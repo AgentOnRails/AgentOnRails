@@ -1,0 +1,21 @@
+## Minimal valid agent config — open endpoint mode, no spend limits.
+## Used by tests that only need a live proxy with no policy enforcement.
+agent_id: "minimal-agent"
+proxy_port: 0    # overridden by test harness
+
+rails:
+  x402:
+    enabled: true
+    wallet_address: "0x0000000000000000000000000000000000000001"
+    preferred_chain: "eip155:84532"
+    per_call_max_usd: ""
+    daily_limit_usd:  ""
+    endpoint_mode: "open"
+    skip_pre_verify: true
+    allowed_networks:
+      - "eip155:84532"
+    velocity:
+      max_per_minute: 100
+      max_per_hour: 1000
+      cooldown_seconds: 0
+    allowed_hosts: []

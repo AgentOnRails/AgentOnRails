@@ -1,0 +1,36 @@
+# Build outputs
+/aor
+/aor.exe
+
+# Local IDE / Claude Code config
+.claude/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Vault / encrypted keys
+vaults/
+*.enc
+
+# Environment / secrets
+.env
+.env.*
+
+# PID files
+*.pid
+
+# Test temp dirs (Go creates these automatically)
+/tmp/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go build cache (usually not in repo root, but guard anyway)
+/vendor/

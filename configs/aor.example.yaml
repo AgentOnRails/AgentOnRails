@@ -1,0 +1,17 @@
+## AgentOnRails — global daemon configuration
+## Copy to ~/.aor/aor.yaml and edit.
+
+daemon:
+  listen_addr: "127.0.0.1"   # interface to bind proxy servers on
+  log_level: "info"           # debug | info | warn | error
+  audit_db: "~/.aor/audit.db"
+  vault_dir: "~/.aor/vaults"
+  pid_file:  "~/.aor/daemon.pid"
+
+alerts:
+  slack_webhook_url: ""       # leave empty to disable Slack notifications
+  budget_threshold_pct: 80    # alert when budget reaches this % of limit
+
+facilitators:
+  x402: "https://api.cdp.coinbase.com/platform/v2/x402"  # Coinbase CDP (production)
+  # x402: "https://x402.org/facilitator"                 # x402.org (testnet only)

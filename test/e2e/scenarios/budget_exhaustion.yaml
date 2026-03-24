@@ -1,0 +1,17 @@
+name: "budget_exhaustion"
+description: "Third request blocked after $0.02 daily limit exhausted by two $0.01 payments"
+policy:
+  daily_limit_usd: "0.02"
+  per_call_max_usd: "0.10"
+  endpoint_mode: "open"
+steps:
+  - description: "First payment: within budget"
+    expect_status: 200
+    expect_audit_status: "allowed"
+  - description: "Second payment: hits exact daily limit"
+    expect_status: 200
+    expect_audit_status: "allowed"
+  - description: "Third payment: blocked by daily budget"
+    expect_status: 403
+    expect_audit_status: "blocked"
+    expect_body_contains: "daily budget exceeded"

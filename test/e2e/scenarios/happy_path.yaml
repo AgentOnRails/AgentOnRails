@@ -1,0 +1,17 @@
+name: "happy_path"
+description: "Agent successfully pays for two API calls; budget decrements correctly"
+policy:
+  per_call_max_usd: "0.10"
+  daily_limit_usd: "1.00"
+  endpoint_mode: "open"
+steps:
+  - description: "First payment succeeds"
+    expect_status: 200
+    expect_audit_status: "allowed"
+    expect_amount_usd: 0.01
+  - description: "Second payment succeeds"
+    expect_status: 200
+    expect_audit_status: "allowed"
+    expect_amount_usd: 0.01
+  - description: "Cumulative spend check"
+    check_daily_spent_cents: 2

@@ -1,0 +1,23 @@
+## Allowlist mode — only requests to explicitly listed hosts are permitted.
+## Used by endpoint enforcement tests.
+agent_id: "allowlist-agent"
+proxy_port: 0    # overridden by test harness
+
+rails:
+  x402:
+    enabled: true
+    wallet_address: "0x0000000000000000000000000000000000000001"
+    preferred_chain: "eip155:84532"
+    per_call_max_usd: "1.00"
+    daily_limit_usd:  "50.00"
+    endpoint_mode: "allowlist"
+    skip_pre_verify: true
+    allowed_networks:
+      - "eip155:84532"
+    velocity:
+      max_per_minute: 30
+      max_per_hour: 200
+      cooldown_seconds: 60
+    allowed_hosts:
+      - "allowed-api.example.com"
+      - "127.0.0.1"

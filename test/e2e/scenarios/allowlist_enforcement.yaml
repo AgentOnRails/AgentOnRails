@@ -1,0 +1,19 @@
+name: "allowlist_enforcement"
+description: "Requests to hosts not on the allowlist are blocked with 403"
+policy:
+  daily_limit_usd: "10.00"
+  per_call_max_usd: "1.00"
+  endpoint_mode: "allowlist"
+  # The test runner rewrites the upstream URL to the mock server,
+  # so allowed_hosts must include 127.0.0.1 for the happy step.
+  allowed_hosts:
+    - "127.0.0.1"
+steps:
+  - description: "Request to allowed host (127.0.0.1 mock server)"
+    expect_status: 200
+    expect_audit_status: "allowed"
+  - description: "Request to unlisted host is blocked"
+    override_url: "http://blocked.example.com/data"
+    expect_status: 403
+    expect_audit_status: "blocked"
+    expect_body_contains: "endpoint_not_on_allowlist"

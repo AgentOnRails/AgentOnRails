@@ -1,0 +1,43 @@
+## AgentOnRails — per-agent policy configuration
+## Copy to ~/.aor/agents/<agent-id>.yaml and edit.
+## Run `aor credentials set-wallet <agent-id>` to store the encrypted wallet key.
+
+agent_id: "my-agent"
+proxy_port: 8402              # agent points its HTTP client at http://localhost:8402
+
+rails:
+  x402:
+    enabled: true
+    wallet_address: "0xYOUR_WALLET_ADDRESS"
+    preferred_chain: "eip155:8453"  # Base mainnet
+
+    ## Spend limits (0 = no limit)
+    per_call_max_usd: "0.10"     # block any single payment above $0.10
+    daily_limit_usd:  "5.00"
+    weekly_limit_usd: "20.00"
+    monthly_limit_usd: "50.00"
+
+    ## Endpoint policy: open | allowlist | blocklist
+    endpoint_mode: "open"
+    allowed_hosts: []
+    blocked_hosts: []
+
+    ## Network allowlist (empty = all known networks allowed)
+    ## Use "eip155:84532" for Base Sepolia testnet during development.
+    allowed_networks:
+      - "eip155:8453"   # Base mainnet
+
+    ## Require Slack/webhook approval for payments above this amount
+    require_approval_above_usd: ""   # empty = never require approval
+
+    ## Velocity limits
+    velocity:
+      max_per_minute: 30
+      max_per_hour: 200
+      cooldown_seconds: 60
+
+    ## Advanced
+    skip_pre_verify: false    # set true to skip facilitator /verify call (faster, riskier)
+    upstream_timeout_sec: 10
+    facilitator_timeout_sec: 5
+    payload_ttl_sec: 60

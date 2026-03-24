@@ -1,0 +1,12 @@
+# Normalize line endings to LF in the repository on all platforms.
+* text=auto eol=lf
+
+# Windows batch files must use CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Explicitly binary — never mangle these.
+*.db binary
+*.enc binary
+*.exe binary
+go.sum binary

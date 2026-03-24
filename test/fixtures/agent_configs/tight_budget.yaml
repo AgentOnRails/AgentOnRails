@@ -1,0 +1,21 @@
+## Very tight $0.02 daily limit — used by budget exhaustion tests.
+## Two $0.01 payments exhaust the budget; the third is blocked.
+agent_id: "tight-agent"
+proxy_port: 0    # overridden by test harness
+
+rails:
+  x402:
+    enabled: true
+    wallet_address: "0x0000000000000000000000000000000000000001"
+    preferred_chain: "eip155:84532"
+    per_call_max_usd: "0.10"
+    daily_limit_usd:  "0.02"
+    endpoint_mode: "open"
+    skip_pre_verify: true
+    allowed_networks:
+      - "eip155:84532"
+    velocity:
+      max_per_minute: 30
+      max_per_hour: 200
+      cooldown_seconds: 60
+    allowed_hosts: []

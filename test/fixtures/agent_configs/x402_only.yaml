@@ -1,0 +1,22 @@
+## x402 rail enabled on Base Sepolia with a $5 daily limit.
+## Representative of a typical development/staging agent config.
+agent_id: "x402-agent"
+proxy_port: 0    # overridden by test harness
+
+rails:
+  x402:
+    enabled: true
+    wallet_address: "0x0000000000000000000000000000000000000001"
+    preferred_chain: "eip155:84532"
+    per_call_max_usd: "0.10"
+    daily_limit_usd:  "5.00"
+    weekly_limit_usd: "20.00"
+    endpoint_mode: "open"
+    skip_pre_verify: false
+    allowed_networks:
+      - "eip155:84532"
+    velocity:
+      max_per_minute: 30
+      max_per_hour: 200
+      cooldown_seconds: 60
+    allowed_hosts: []

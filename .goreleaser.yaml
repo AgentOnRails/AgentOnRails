@@ -1,0 +1,91 @@
+version: 2
+
+project_name: aor
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: aor
+    main: ./cmd/aor/
+    binary: aor
+    ldflags:
+      - -s -w -X github.com/agentOnRails/agent-on-rails/internal/version.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: aor
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - configs/aor.example.yaml
+      - configs/agents/my-agent.example.yaml
+
+brews:
+  - name: aor
+    repository:
+      owner: agentOnRails
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/agentOnRails/agent-on-rails"
+    description: "Per-agent payment guardrails for AI agents via the x402 protocol"
+    license: "Apache-2.0"
+    skip_upload: auto
+    install: |
+      bin.install "aor"
+    test: |
+      system "#{bin}/aor", "version"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: agentOnRails
+    name: agent-on-rails
+  name_template: "v{{ .Version }}"
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```bash
+    curl -sf https://raw.githubusercontent.com/agentOnRails/agent-on-rails/main/scripts/install.sh | sh
+    ```
+
+    Or via Go:
+
+    ```bash
+    go install github.com/agentOnRails/agent-on-rails/cmd/aor@v{{ .Version }}
+    ```

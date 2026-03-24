@@ -1,0 +1,10 @@
+name: "velocity_attack"
+description: "31st request blocked after 30/min velocity limit is reached"
+policy:
+  daily_limit_usd: "100.00"
+  per_call_max_usd: "1.00"
+  endpoint_mode: "open"
+# repeat_count: makes repeat_count identical requests; checks only the last one
+repeat_count: 31
+expect_last_status: 429
+expect_last_body_contains: "velocity_exceeded"
