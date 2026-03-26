@@ -36,6 +36,7 @@ func init() {
 	Root.AddCommand(spendCmd)
 	Root.AddCommand(auditCmd)
 	Root.AddCommand(credentialsCmd)
+	Root.AddCommand(mcpCmd)
 }
 
 // Execute runs the root command. Called from main().

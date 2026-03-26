@@ -13,6 +13,7 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
 ## What it does
 
 - **Transparent proxy** — agents point their HTTP client at a local port; no SDK changes required
+- **MCP server** — exposes payment tools (`request_payment`, `get_balance`, `get_spend_history`, `get_policy`) to Claude Desktop, Claude Code, Cursor, and any MCP-compatible agent
 - **x402 payment rail** — automatically handles HTTP 402 Payment Required challenges: signs EIP-3009 authorizations, pre-verifies with the facilitator, and retries the request
 - **Spend guardrails** — per-agent daily/weekly/monthly budgets, per-call maximums, velocity limits, endpoint allowlists/blocklists
 - **Encrypted wallet vault** — private keys never touch disk unencrypted; AES-256-GCM + scrypt
@@ -140,6 +141,149 @@ aor logs tail
 
 ---
 
+## MCP server mode
+
+In addition to the transparent proxy, AgentOnRails can run as an **MCP (Model Context Protocol) server**. Instead of intercepting HTTP traffic, the agent makes payments via explicit tool calls — useful for Claude Desktop, Claude Code, Cursor, and any other MCP-compatible client.
+
+```
+Claude Desktop / Claude Code / Cursor
+           ↓  MCP stdio (subprocess)
+       [AgentOnRails]
+           ↓
+  https://paid-api.example.com
+```
+
+No daemon required. `aor mcp` starts as a subprocess, talks over stdin/stdout, and exits when the client closes.
+
+### Available tools
+
+| Tool | What it does |
+|------|-------------|
+| `request_payment` | Fetch a URL through the x402 rail — handles 402 challenges, enforces spend policy, returns the response body |
+| `get_balance` | Wallet address + remaining budget per spend window (daily / weekly / monthly) |
+| `get_spend_history` | Query the transaction audit log; supports `since`, `limit`, and `status` filters |
+| `get_policy` | Inspect the active spend policy — limits, endpoint rules, velocity config (no private keys) |
+
+### Prerequisites
+
+You need a configured agent before starting. If you haven't done the [Quick start](#quick-start) yet:
+
+```bash
+aor init
+aor agents create        # follow the wizard
+aor credentials set-wallet my-agent
+```
+
+### Setup: Claude Desktop
+
+Config file location:
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "aor-my-agent": {
+      "command": "aor",
+      "args": ["mcp", "--agent", "my-agent"],
+      "env": {
+        "AOR_PASSPHRASE": "your-vault-passphrase"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The four tools will appear in the tool picker.
+
+### Setup: Claude Code CLI
+
+```bash
+# Add the MCP server
+claude mcp add aor-my-agent -- aor mcp --agent my-agent
+
+# Set your passphrase (add to shell profile to make it persistent)
+export AOR_PASSPHRASE="your-vault-passphrase"
+```
+
+Or edit `~/.claude/settings.json` directly:
+
+```json
+{
+  "mcpServers": {
+    "aor-my-agent": {
+      "command": "aor",
+      "args": ["mcp", "--agent", "my-agent"],
+      "env": {
+        "AOR_PASSPHRASE": "your-vault-passphrase"
+      }
+    }
+  }
+}
+```
+
+### Running multiple agents
+
+Add one entry per agent. Each instance is fully isolated — separate wallet, separate budget tracker, separate audit entries.
+
+```json
+{
+  "mcpServers": {
+    "aor-research": {
+      "command": "aor",
+      "args": ["mcp", "--agent", "research"],
+      "env": { "AOR_PASSPHRASE": "your-passphrase" }
+    },
+    "aor-coding": {
+      "command": "aor",
+      "args": ["mcp", "--agent", "coding"],
+      "env": { "AOR_PASSPHRASE": "your-passphrase" }
+    }
+  }
+}
+```
+
+### What it looks like in practice
+
+```
+# Agent checks its budget before starting a research task
+get_balance
+→ {
+    "agent_id": "research",
+    "wallet_address": "0xABC...",
+    "preferred_chain": "eip155:8453",
+    "budgets": [
+      { "period": "daily",   "limit_usd": "$5.00", "spent_usd": "$0.83", "remaining_usd": "$4.17", "reset_at": "2026-03-26T00:00:00Z" },
+      { "period": "weekly",  "limit_usd": "$25.00", "spent_usd": "$3.21", "remaining_usd": "$21.79", "reset_at": "2026-03-30T00:00:00Z" },
+      { "period": "monthly", "limit_usd": "$100.00", "spent_usd": "$12.40", "remaining_usd": "$87.60", "reset_at": "2026-04-01T00:00:00Z" }
+    ]
+  }
+
+# Agent fetches a paid resource
+request_payment url="https://api.example.com/papers/summary" task_context="summarize_arxiv_paper"
+→ {"title": "Attention Is All You Need", "summary": "..."}
+  [AgentOnRails: payment settled — PAYMENT-RESPONSE: eyJzdWNjZXNzI...]
+
+# Agent reviews what it spent
+get_spend_history since="1h" limit=5
+→ [
+    { "timestamp": "2026-03-25T14:05:00Z", "endpoint": "https://api.example.com/papers/summary",
+      "amount_usd": "$0.0100", "status": "allowed", "tx_hash": "0xabc...", "task_context": "summarize_arxiv_paper" }
+  ]
+```
+
+### Proxy mode vs MCP mode
+
+| | Proxy mode (`aor start`) | MCP mode (`aor mcp`) |
+|---|---|---|
+| Agent changes needed | None — set `HTTP_PROXY` env var | Add server to MCP config |
+| Payment visibility | Transparent (agent doesn't see it) | Explicit tool calls |
+| HTTPS upstream | CONNECT tunnel — no 402 interception | Full HTTPS support |
+| Works with | Any HTTP client | MCP-compatible agents only |
+| Best for | Drop-in adoption, existing agents | Claude Desktop, Claude Code, Cursor |
+
+---
+
 ## Testnet development (Base Sepolia)
 
 The fastest way to develop and test against real x402 endpoints without spending real money.
@@ -221,6 +365,11 @@ aor audit [agent-id] [--since 24h] [--limit 50]
 aor credentials set-wallet <agent-id>
     Encrypt and store a wallet private key in the vault.
 
+aor mcp --agent <agent-id> [--passphrase ...]
+    Start an MCP server for a single agent over stdio. Exposes request_payment,
+    get_balance, get_spend_history, and get_policy as MCP tools. Passphrase can
+    also be set via AOR_PASSPHRASE. See MCP server mode section for client config.
+
 aor version
     Print version and build info.
 ```
@@ -300,6 +449,8 @@ The Sepolia tests make real on-chain USDC transfers (~$0.02 total). Use a dedica
 ## Roadmap
 
 - [x] x402 crypto rail (Base, Ethereum, Optimism, Arbitrum, Polygon)
+- [x] MCP server mode (`aor mcp`) — Claude Desktop, Claude Code, Cursor
+- [ ] HTTP 402 passthrough (Stripe, Cloudflare, Vercel ecosystem)
 - [ ] Virtual card rail (Stripe Issuing / Lithic)
 - [ ] Bank ACH rail (Stripe Treasury / Plaid Transfer)
 - [ ] GUI dashboard
