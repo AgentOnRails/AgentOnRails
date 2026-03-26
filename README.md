@@ -309,7 +309,3 @@ The Sepolia tests make real on-chain USDC transfers (~$0.02 total). Use a dedica
 - [ ] GUI dashboard
 - [ ] Team mode (shared budget pools)
 - [ ] L402 (Lightning Network) rail
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE).
