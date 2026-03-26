@@ -228,8 +228,8 @@ func TestSelectRequirement_PreferredChain(t *testing.T) {
 	}}
 	challenge := &PaymentRequired{
 		Accepts: []PaymentRequirement{
-			{Network: "eip155:1", Amount: "100"},
-			{Network: "eip155:8453", Amount: "100"},
+			{Scheme: "exact", Network: "eip155:1", Amount: "100"},
+			{Scheme: "exact", Network: "eip155:8453", Amount: "100"},
 		},
 	}
 	req, err := rail.selectRequirement(challenge)
@@ -247,7 +247,7 @@ func TestSelectRequirement_FallbackToAny(t *testing.T) {
 	}}
 	challenge := &PaymentRequired{
 		Accepts: []PaymentRequirement{
-			{Network: "eip155:8453", Amount: "100"},
+			{Scheme: "exact", Network: "eip155:8453", Amount: "100"},
 		},
 	}
 	req, err := rail.selectRequirement(challenge)
@@ -278,8 +278,8 @@ func TestSelectRequirement_AllowedNetworksFilter(t *testing.T) {
 	}}
 	challenge := &PaymentRequired{
 		Accepts: []PaymentRequirement{
-			{Network: "eip155:8453"},   // mainnet — should be rejected
-			{Network: "eip155:84532"},  // testnet — should be chosen
+			{Scheme: "exact", Network: "eip155:8453"},  // mainnet — should be rejected
+			{Scheme: "exact", Network: "eip155:84532"}, // testnet — should be chosen
 		},
 	}
 	req, err := rail.selectRequirement(challenge)
@@ -305,8 +305,12 @@ func TestParsePriceToCents(t *testing.T) {
 		{"500000", 50},    // $0.50 = 50 cents
 		{"0", 0},
 	}
+	const (
+		testNetwork = "eip155:8453"
+		testAsset   = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" // USDC on Base
+	)
 	for _, tt := range tests {
-		cents, raw, err := rail.parsePriceToCents(tt.atomicAmount, "", "")
+		cents, raw, err := rail.parsePriceToCents(tt.atomicAmount, testAsset, testNetwork)
 		if err != nil {
 			t.Errorf("parsePriceToCents(%q): unexpected error: %v", tt.atomicAmount, err)
 			continue
@@ -322,7 +326,7 @@ func TestParsePriceToCents(t *testing.T) {
 
 func TestParsePriceToCents_InvalidInput(t *testing.T) {
 	rail := &X402Rail{policy: &X402Policy{}}
-	_, _, err := rail.parsePriceToCents("not-a-number", "", "")
+	_, _, err := rail.parsePriceToCents("not-a-number", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "eip155:8453")
 	if err == nil {
 		t.Error("expected error for invalid amount")
 	}
