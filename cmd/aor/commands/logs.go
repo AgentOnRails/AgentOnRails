@@ -98,7 +98,6 @@ var logsTailCmd = &cobra.Command{
 						status = fmt.Sprintf("%s (%s)", t.Status, truncate(t.BlockReason, 30))
 					}
 
-					tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 						t.Timestamp.Format("01-02 15:04:05"),
 						t.AgentID,
@@ -110,9 +109,9 @@ var logsTailCmd = &cobra.Command{
 					tw.Flush()
 
 					// Purge old entries from seen map to avoid unbounded growth.
+					// Keep watermark intact so already-printed rows are not repeated.
 					if len(seen) > 500 {
 						seen = make(map[string]bool)
-						watermark = time.Now().Add(-time.Second)
 					}
 				}
 			}

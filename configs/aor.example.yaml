@@ -13,5 +13,5 @@ alerts:
   budget_threshold_pct: 80    # alert when budget reaches this % of limit
 
 facilitators:
-  x402: "https://api.cdp.coinbase.com/platform/v2/x402"  # Coinbase CDP (production)
-  # x402: "https://x402.org/facilitator"                 # x402.org (testnet only)
+  x402: "https://x402.org/facilitator"                   # Coinbase-operated public facilitator (default)
+  # x402: "https://api.cdp.coinbase.com/platform/v2/x402"  # Enterprise Coinbase CDP endpoint

@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -66,8 +67,8 @@ const (
 	eip712DomainTypeString = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
 
 	// Facilitator endpoints.
-	FacilitatorCDP     = "https://api.cdp.coinbase.com/platform/v2/x402"
-	FacilitatorX402Org = "https://x402.org/facilitator" // testnet only
+	FacilitatorCDP     = "https://api.cdp.coinbase.com/platform/v2/x402" // enterprise CDP endpoint
+	FacilitatorX402Org = "https://x402.org/facilitator"                  // Coinbase-operated public facilitator (default)
 
 	facilitatorVerifyPath = "/verify"
 	facilitatorSettlePath = "/settle"
@@ -81,6 +82,11 @@ const (
 	// has enough time to verify before the payload expires. 60 seconds matches
 	// the maxTimeoutSeconds typically advertised by servers.
 	defaultPayloadTTL = 60 * time.Second
+
+	// x402SchemeExact is the only payment scheme this rail supports.
+	// Other schemes (e.g. "usd-amount") use different signing mechanisms and
+	// would produce invalid signatures if selected.
+	x402SchemeExact = "exact"
 )
 
 // ─── CAIP-2 network identifiers ───────────────────────────────────────────────
@@ -831,28 +837,53 @@ func (r *X402Rail) selectRequirement(challenge *PaymentRequired) (*PaymentRequir
 		}
 	}
 
+	// isAcceptable returns true only for requirements this rail can sign:
+	// scheme must be "exact" and the network must be known and allowed.
+	isAcceptable := func(req *PaymentRequirement) bool {
+		if req.Scheme != x402SchemeExact {
+			return false
+		}
+		if !allowedNets[req.Network] {
+			return false
+		}
+		_, known := KnownNetworks[req.Network]
+		return known
+	}
+
 	// Prefer the configured preferred chain.
 	for i := range challenge.Accepts {
 		req := &challenge.Accepts[i]
-		if req.Network == r.policy.PreferredChain && allowedNets[req.Network] {
-			if _, known := KnownNetworks[req.Network]; known {
-				return req, nil
-			}
+		if req.Network == r.policy.PreferredChain && isAcceptable(req) {
+			return req, nil
 		}
 	}
 
-	// Fall back to any allowed known network.
+	// Fall back to any acceptable option.
 	for i := range challenge.Accepts {
 		req := &challenge.Accepts[i]
-		if allowedNets[req.Network] {
-			if _, known := KnownNetworks[req.Network]; known {
-				return req, nil
-			}
+		if isAcceptable(req) {
+			return req, nil
 		}
 	}
 
-	return nil, fmt.Errorf("no_acceptable_network: server requires %v, aor allows %v",
-		networksFromRequirements(challenge.Accepts), r.policy.AllowedNetworks)
+	return nil, fmt.Errorf("no_acceptable_payment_option: server requires %v (schemes %v), aor supports scheme=%q networks=%v",
+		networksFromRequirements(challenge.Accepts),
+		schemesFromRequirements(challenge.Accepts),
+		x402SchemeExact,
+		r.policy.AllowedNetworks,
+	)
+}
+
+func schemesFromRequirements(reqs []PaymentRequirement) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, r := range reqs {
+		if !seen[r.Scheme] {
+			seen[r.Scheme] = true
+			out = append(out, r.Scheme)
+		}
+	}
+	return out
 }
 
 func networksFromRequirements(reqs []PaymentRequirement) []string {
@@ -867,7 +898,19 @@ func networksFromRequirements(reqs []PaymentRequirement) []string {
 
 // parsePriceToCents converts the atomic-unit amount string from the challenge
 // into USD cents. USDC has 6 decimals: 1 USDC = 1_000_000 units = 100 cents.
+// It rejects any asset that is not the canonical USDC address for the network,
+// because a different token may have different decimals and the conversion
+// would be silently wrong.
 func (r *X402Rail) parsePriceToCents(atomicAmount, asset, network string) (int64, string, error) {
+	netInfo, ok := KnownNetworks[network]
+	if !ok {
+		return 0, "", fmt.Errorf("unknown network %q", network)
+	}
+	if netInfo.USDCAddress != "" && !strings.EqualFold(asset, netInfo.USDCAddress) {
+		return 0, "", fmt.Errorf("unsupported asset %s on %s: only USDC (%s) is supported",
+			asset, network, netInfo.USDCAddress)
+	}
+
 	amt, ok := new(big.Int).SetString(atomicAmount, 10)
 	if !ok {
 		return 0, "", fmt.Errorf("cannot parse amount %q as integer", atomicAmount)
@@ -1220,10 +1263,68 @@ func NewReverseProxyHandler(rail *X402Rail, agentID string) *ReverseProxyHandler
 }
 
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// CONNECT requests are used by HTTP clients to establish HTTPS tunnels
+	// (e.g. when HTTPS_PROXY is set). We pass them through as a transparent
+	// TCP tunnel. x402 payment interception is not possible inside a TLS
+	// session, so HTTPS upstream payments are not handled.
+	if req.Method == http.MethodConnect {
+		h.handleConnect(w, req)
+		return
+	}
+
 	// agentID is always taken from the handler (set at proxy startup), not from
 	// the request header — allowing clients to override it would corrupt audit logs.
 	taskCtx := req.Header.Get(headerSentinelTask)
 	h.rail.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
+}
+
+// handleConnect establishes a transparent TCP tunnel for HTTPS CONNECT requests.
+// The proxy pipes raw bytes between the client and the destination without
+// inspecting the TLS payload, so x402 payment handling does not apply to
+// traffic routed through this tunnel.
+func (h *ReverseProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
+	// Dial the destination before hijacking so we can still send an HTTP error
+	// if the connection fails.
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(req.Context(), "tcp", req.Host)
+	if err != nil {
+		http.Error(w, "aor: CONNECT dial failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		destConn.Close()
+		http.Error(w, "aor: CONNECT not supported (hijacking unavailable)", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		destConn.Close()
+		return
+	}
+	defer clientConn.Close()
+	defer destConn.Close()
+
+	h.rail.logger.Debug("CONNECT tunnel opened",
+		zap.String("agent", h.agentID),
+		zap.String("host", req.Host),
+	)
+
+	// Signal the client that the tunnel is established.
+	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	// Pipe bytes bidirectionally. errCh is buffered so neither goroutine leaks
+	// when the deferred Close unblocks the other side.
+	errCh := make(chan struct{}, 2)
+	pipe := func(dst, src net.Conn) {
+		io.Copy(dst, src) //nolint:errcheck
+		errCh <- struct{}{}
+	}
+	go pipe(destConn, clientConn)
+	go pipe(clientConn, destConn)
+	// Wait for one direction to close; deferred Close unblocks the other.
+	<-errCh
 }
 
 var _ http.Handler = (*ReverseProxyHandler)(nil)

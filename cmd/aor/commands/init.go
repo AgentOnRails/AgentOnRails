@@ -72,10 +72,10 @@ alerts:
   budget_threshold_pct: 80 # alert when an agent's spend reaches 80%% of its limit
 
 facilitators:
-  # Production (Base, Ethereum, Optimism, Arbitrum, Polygon):
-  x402: "https://api.cdp.coinbase.com/platform/v2/x402"
-  # Testnet (Base Sepolia) — uncomment to use:
-  # x402: "https://x402.org/facilitator"
+  # Coinbase-operated public facilitator — works for mainnet and testnet:
+  x402: "https://x402.org/facilitator"
+  # Enterprise Coinbase CDP endpoint (if you have CDP credentials):
+  # x402: "https://api.cdp.coinbase.com/platform/v2/x402"
 `, aorDir, aorDir, aorDir)
 }
 

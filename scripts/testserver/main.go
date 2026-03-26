@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -114,7 +115,16 @@ func (s *server) handlePaid(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.verify {
-		if err := s.callFacilitatorVerify(sig); err != nil {
+		req := paymentRequirement{
+			Scheme:            "exact",
+			Network:           s.network,
+			Amount:            s.amount,
+			Asset:             s.asset,
+			PayTo:             s.payTo,
+			MaxTimeoutSeconds: 60,
+			Extra:             map[string]any{"name": "USDC", "version": "2"},
+		}
+		if err := s.callFacilitatorVerify(sig, req); err != nil {
 			log.Printf("testserver: facilitator verify rejected: %v", err)
 			s.send402(w)
 			return
@@ -153,18 +163,40 @@ func (s *server) send402(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusPaymentRequired)
 }
 
+// facilitatorVerifyReq is the JSON body the x402 facilitator /verify endpoint expects.
+type facilitatorVerifyReq struct {
+	PaymentPayload      json.RawMessage    `json:"paymentPayload"`
+	PaymentRequirements paymentRequirement `json:"paymentRequirements"`
+}
+
 // callFacilitatorVerify calls <facilitator>/verify with the payment signature.
-// It returns nil if the facilitator accepts the payment, or an error otherwise.
-func (s *server) callFacilitatorVerify(sig string) error {
-	url := strings.TrimRight(s.facilitator, "/") + "/verify"
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(sig))
+// sig is the base64-encoded PAYMENT-SIGNATURE header value.
+// req is the payment requirement the server advertised.
+// Returns nil if the facilitator accepts the payment, or an error otherwise.
+func (s *server) callFacilitatorVerify(sig string, req paymentRequirement) error {
+	// The PAYMENT-SIGNATURE header is base64-encoded JSON.
+	payloadBytes, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil {
+		return fmt.Errorf("decode payment signature: %w", err)
+	}
+
+	body, err := json.Marshal(facilitatorVerifyReq{
+		PaymentPayload:      json.RawMessage(payloadBytes),
+		PaymentRequirements: req,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal verify request: %w", err)
+	}
+
+	verifyURL := strings.TrimRight(s.facilitator, "/") + "/verify"
+	httpReq, err := http.NewRequest(http.MethodPost, verifyURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "text/plain")
+	httpReq.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("facilitator unreachable: %w", err)
 	}

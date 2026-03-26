@@ -7,7 +7,7 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
                                         ↑
                             policy check + EIP-3009 sign
                                         ↓
-                              Coinbase CDP facilitator
+                          x402.org facilitator (operated by Coinbase)
 ```
 
 ## What it does
@@ -116,15 +116,18 @@ export HTTPS_PROXY=http://localhost:8402
 
 That's it. Any HTTP client that respects standard proxy env vars works — Python `httpx`/`requests`, Node `fetch`, `curl`, LangChain, CrewAI, etc. No SDK changes required.
 
+> **Note on HTTPS targets:** x402 payment interception works for **plain HTTP** upstream URLs. For HTTPS targets the proxy establishes a transparent CONNECT tunnel — traffic passes through but 402 challenges inside the TLS session are not visible and payments are not handled. Use HTTP endpoints (or a TLS-terminating reverse proxy in front of your API) for x402 payments.
+
 ```python
 import os, httpx
-os.environ["HTTPS_PROXY"] = "http://localhost:8402"
-response = httpx.get("https://api.paid-service.example.com/data")
+# x402 payments handled — use plain HTTP upstream
+os.environ["HTTP_PROXY"] = "http://localhost:8402"
+response = httpx.get("http://api.paid-service.example.com/data")
 # 402 → sign → retry happens transparently
 ```
 
 ```bash
-curl -x http://localhost:8402 https://api.paid-service.example.com/data
+curl -x http://localhost:8402 http://api.paid-service.example.com/data
 ```
 
 ### 6. Watch it work
@@ -148,14 +151,7 @@ The fastest way to develop and test against real x402 endpoints without spending
 
 ### Configure for testnet
 
-In `~/.aor/aor.yaml`, switch the facilitator:
-
-```yaml
-facilitators:
-  x402: "https://x402.org/facilitator"
-```
-
-In your agent config, use Base Sepolia:
+The default facilitator (`https://x402.org/facilitator`) already targets testnet, so no facilitator change is needed. In your agent config, use Base Sepolia:
 
 ```yaml
 rails:

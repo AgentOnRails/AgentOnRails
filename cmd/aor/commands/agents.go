@@ -160,7 +160,10 @@ var agentsCreateCmd = &cobra.Command{
 		storeNow := prompt(in, "Store encrypted wallet key now?", "Y")
 		if strings.HasPrefix(strings.ToLower(storeNow), "y") {
 			// Delegate to the existing set-wallet logic by running it inline.
-			setWalletCmd.RunE(setWalletCmd, []string{agentID})
+			if err := setWalletCmd.RunE(setWalletCmd, []string{agentID}); err != nil {
+				fmt.Fprintf(os.Stderr, "\nWarning: wallet setup failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Run `aor credentials set-wallet %s` to retry.\n", agentID)
+			}
 		} else {
 			fmt.Printf("\nRun this when ready:\n  aor credentials set-wallet %s\n", agentID)
 		}

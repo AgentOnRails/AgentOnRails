@@ -83,7 +83,7 @@ const (
 	DefaultListenAddr         = "127.0.0.1"
 	DefaultLogLevel           = "info"
 	DefaultBudgetThresholdPct = 80.0
-	DefaultFacilitatorX402    = "https://api.cdp.coinbase.com/platform/v2/x402"
+	DefaultFacilitatorX402    = "https://x402.org/facilitator"
 	DefaultEndpointMode       = "open"
 	DefaultMaxPerMinute       = 30
 	DefaultMaxPerHour         = 200
