@@ -2,10 +2,12 @@ package x402
 
 import (
 	"context"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -447,6 +449,103 @@ func TestProxyRequest_FreeEndpoint_PassThrough(t *testing.T) {
 	}
 }
 
+func TestProxyRequest_Plain402_PassThrough(t *testing.T) {
+	// Upstream returns a plain HTTP 402 (e.g. Stripe card error) with no x402 markers.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte(`{"error":{"type":"card_error","code":"card_declined","message":"Your card was declined."}}`))
+	}))
+	defer upstream.Close()
+
+	var logged []TransactionRecord
+	auditLogger := &capturingAuditLogger{records: &logged}
+
+	key, _ := ethcrypto.GenerateKey()
+	addr := ethcrypto.PubkeyToAddress(key.PublicKey)
+	policy := &X402Policy{
+		PrivateKey:         key,
+		WalletAddress:      addr.Hex(),
+		PreferredChain:     "eip155:84532",
+		FacilitatorURL:     "http://localhost:9999",
+		UpstreamTimeout:    5 * time.Second,
+		FacilitatorTimeout: 5 * time.Second,
+		PayloadTTL:         60 * time.Second,
+		EndpointMode:       "open",
+		SkipPreVerify:      true,
+	}
+
+	logger := noopLogger()
+	rail, err := NewX402Rail(policy, auditLogger, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", upstream.URL+"/paid", nil)
+	req.RequestURI = ""
+	w := httptest.NewRecorder()
+
+	rail.ProxyRequest(context.Background(), w, req, "test-agent", "")
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Errorf("status = %d, want 402", resp.StatusCode)
+	}
+	if len(logged) > 0 && logged[0].Status != "passthrough_402" {
+		t.Errorf("audit status = %q, want %q", logged[0].Status, "passthrough_402")
+	}
+}
+
+func TestLooksLikeX402Challenge(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		body   string
+		want   bool
+	}{
+		{
+			name:   "v2 header present",
+			header: `{"x402Version":1,"accepts":[]}`,
+			want:   true,
+		},
+		{
+			name: "v1 body with x402Version",
+			body: `{"x402Version":1,"accepts":[]}`,
+			want: true,
+		},
+		{
+			name: "plain stripe error",
+			body: `{"error":{"type":"card_error","code":"card_declined"}}`,
+			want: false,
+		},
+		{
+			name: "empty body",
+			body: "",
+			want: false,
+		},
+		{
+			name: "non-json body",
+			body: "Payment required",
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{
+				Header: http.Header{},
+				Body:   io.NopCloser(strings.NewReader(tc.body)),
+			}
+			if tc.header != "" {
+				resp.Header.Set(headerPaymentRequired, tc.header)
+			}
+			got := looksLikeX402Challenge(resp)
+			if got != tc.want {
+				t.Errorf("looksLikeX402Challenge = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 func mustParseURL(rawURL string) *url.URL {
@@ -459,6 +558,16 @@ func mustParseURL(rawURL string) *url.URL {
 
 // noopAuditLogger satisfies AuditLogger without doing anything.
 type noopAuditLogger struct{}
+
+// capturingAuditLogger records every LogTransaction call for test assertions.
+type capturingAuditLogger struct {
+	records *[]TransactionRecord
+}
+
+func (c *capturingAuditLogger) LogTransaction(tx TransactionRecord) error {
+	*c.records = append(*c.records, tx)
+	return nil
+}
 
 func (n *noopAuditLogger) LogTransaction(tx TransactionRecord) error { return nil }
 

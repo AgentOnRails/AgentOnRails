@@ -15,6 +15,7 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
 - **Transparent proxy** — agents point their HTTP client at a local port; no SDK changes required
 - **MCP server** — exposes payment tools (`request_payment`, `get_balance`, `get_spend_history`, `get_policy`) to Claude Desktop, Claude Code, Cursor, and any MCP-compatible agent
 - **x402 payment rail** — automatically handles HTTP 402 Payment Required challenges: signs EIP-3009 authorizations, pre-verifies with the facilitator, and retries the request
+- **Non-x402 402 passthrough** — plain HTTP 402 responses from Stripe, Cloudflare, Vercel, and other non-x402 APIs are forwarded transparently to the agent instead of being replaced with a 502
 - **Spend guardrails** — per-agent daily/weekly/monthly budgets, per-call maximums, velocity limits, endpoint allowlists/blocklists
 - **Encrypted wallet vault** — private keys never touch disk unencrypted; AES-256-GCM + scrypt
 - **Audit log** — every transaction written to SQLite; queryable with `aor audit` and `aor spend`
@@ -415,8 +416,10 @@ aor version
 ## How x402 works
 
 1. Agent sends a normal HTTP request through the proxy
-2. Upstream returns `402 Payment Required` with a `PAYMENT-REQUIRED` header (base64 JSON challenge)
-3. AgentOnRails parses the challenge, checks policy (budget, allowlist, velocity)
+2. Upstream returns `402 Payment Required`
+   - **If no x402 markers** (`PAYMENT-REQUIRED` header or `x402Version` in body) — the 402 is forwarded transparently. Stripe card errors, Vercel billing walls, and other non-x402 402s reach the agent as-is.
+   - **If x402 markers present** — continue below
+3. AgentOnRails parses the `PAYMENT-REQUIRED` challenge, checks policy (budget, allowlist, velocity)
 4. Signs an EIP-3009 `transferWithAuthorization` payload with the agent's wallet key
 5. Pre-verifies the signature with the Coinbase CDP facilitator (optional but recommended)
 6. Retries the original request with a `PAYMENT-SIGNATURE` header
@@ -450,7 +453,7 @@ The Sepolia tests make real on-chain USDC transfers (~$0.02 total). Use a dedica
 
 - [x] x402 crypto rail (Base, Ethereum, Optimism, Arbitrum, Polygon)
 - [x] MCP server mode (`aor mcp`) — Claude Desktop, Claude Code, Cursor
-- [ ] HTTP 402 passthrough (Stripe, Cloudflare, Vercel ecosystem)
+- [x] HTTP 402 passthrough (Stripe, Cloudflare, Vercel ecosystem)
 - [ ] Virtual card rail (Stripe Issuing / Lithic)
 - [ ] Bank ACH rail (Stripe Treasury / Plaid Transfer)
 - [ ] GUI dashboard

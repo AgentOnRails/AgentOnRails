@@ -634,7 +634,19 @@ func (r *X402Rail) ProxyRequest(
 		return
 	}
 
-	// ── Step 5: Parse the payment challenge ──────────────────────────────────
+	// ── Step 5: Detect x402 vs plain 402 ────────────────────────────────────
+	if !looksLikeX402Challenge(resp) {
+		record.Status = "passthrough_402"
+		record.BlockReason = "non_x402_payment_required"
+		r.logger.Info("passing through non-x402 402 response",
+			zap.String("agent", agentID),
+			zap.String("url", req.URL.String()),
+		)
+		copyResponse(w, resp)
+		return
+	}
+
+	// ── Step 6: Parse the x402 challenge ─────────────────────────────────────
 	challenge, err := r.parsePaymentRequired(resp)
 	if err != nil {
 		record.BlockReason = "invalid_payment_required_header"
@@ -646,7 +658,7 @@ func (r *X402Rail) ProxyRequest(
 		return
 	}
 
-	// ── Step 6: Select best matching requirement ─────────────────────────────
+	// ── Step 7: Select best matching requirement ─────────────────────────────
 	chosen, err := r.selectRequirement(challenge)
 	if err != nil {
 		record.BlockReason = "no_acceptable_payment_option"
@@ -658,7 +670,7 @@ func (r *X402Rail) ProxyRequest(
 		return
 	}
 
-	// ── Step 7: Budget checks ────────────────────────────────────────────────
+	// ── Step 8: Budget checks ────────────────────────────────────────────────
 	amountCents, amountRaw, err := r.parsePriceToCents(chosen.Amount, chosen.Asset, chosen.Network)
 	if err != nil {
 		record.BlockReason = "amount_parse_error"
@@ -688,7 +700,7 @@ func (r *X402Rail) ProxyRequest(
 		}
 	}()
 
-	// ── Step 8: Human approval gate ──────────────────────────────────────────
+	// ── Step 9: Human approval gate ──────────────────────────────────────────
 	if r.policy.RequireApprovalAboveCents > 0 && amountCents > r.policy.RequireApprovalAboveCents {
 		if r.policy.ApprovalFunc == nil {
 			record.BlockReason = "approval_required_but_no_approver_configured"
@@ -713,7 +725,7 @@ func (r *X402Rail) ProxyRequest(
 		}
 	}
 
-	// ── Step 9: Sign EIP-3009 authorization ──────────────────────────────────
+	// ── Step 10: Sign EIP-3009 authorization ─────────────────────────────────
 	payload, err := r.signPayment(ctx, chosen, challenge.Resource, req.URL.String())
 	if err != nil {
 		record.BlockReason = "signing_error: " + err.Error()
@@ -722,7 +734,7 @@ func (r *X402Rail) ProxyRequest(
 		return
 	}
 
-	// ── Step 10: Optional facilitator pre-verification ────────────────────────
+	// ── Step 11: Optional facilitator pre-verification ───────────────────────
 	if !r.policy.skipPreVerify() {
 		if err := r.preVerify(ctx, payload, chosen); err != nil {
 			record.BlockReason = "facilitator_pre_verify_failed: " + err.Error()
@@ -732,7 +744,7 @@ func (r *X402Rail) ProxyRequest(
 		}
 	}
 
-	// ── Step 11: Retry with payment signature ────────────────────────────────
+	// ── Step 12: Retry with payment signature ────────────────────────────────
 	payloadHeader, err := encodePaymentPayload(payload)
 	if err != nil {
 		record.BlockReason = "payload_encode_error"
@@ -756,7 +768,7 @@ func (r *X402Rail) ProxyRequest(
 	}
 	defer retryResp.Body.Close()
 
-	// ── Step 12: Parse settlement response ───────────────────────────────────
+	// ── Step 13: Parse settlement response ───────────────────────────────────
 	if paymentRespHeader := retryResp.Header.Get(headerPaymentResponse); paymentRespHeader != "" {
 		if pr, err := decodePaymentResponse(paymentRespHeader); err == nil {
 			record.TxHash = pr.Transaction
@@ -768,7 +780,7 @@ func (r *X402Rail) ProxyRequest(
 		}
 	}
 
-	// ── Step 13: Check upstream accepted the payment ──────────────────────────
+	// ── Step 14: Check upstream accepted the payment ─────────────────────────
 	if retryResp.StatusCode == http.StatusPaymentRequired {
 		record.BlockReason = "upstream_rejected_signed_payment"
 		record.Status = "failed"
@@ -780,7 +792,7 @@ func (r *X402Rail) ProxyRequest(
 		return
 	}
 
-	// ── Step 14: Record outcome — payment was submitted on-chain so debit stands ─
+	// ── Step 15: Record outcome — payment was submitted on-chain so debit stands ─
 	budgetReserved = false
 	record.AmountUSD = float64(amountCents) / 100
 	record.AmountRaw = amountRaw
@@ -1192,6 +1204,28 @@ func (r *X402Rail) buildUpstreamRequest(ctx context.Context, req *http.Request) 
 
 	outReq.Header.Set("User-Agent", "agentOnRails-proxy/0.1 (x402-client)")
 	return outReq, nil
+}
+
+// looksLikeX402Challenge reports whether a 402 response carries x402 markers.
+// V2: PAYMENT-REQUIRED header is present.
+// V1: JSON body contains a non-zero x402Version field.
+// The response body is buffered so it can be re-read by parsePaymentRequired.
+func looksLikeX402Challenge(resp *http.Response) bool {
+	if resp.Header.Get(headerPaymentRequired) != "" {
+		return true
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil || len(body) == 0 {
+		return false
+	}
+	var probe struct {
+		X402Version int `json:"x402Version"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return probe.X402Version != 0
 }
 
 func (r *X402Rail) parsePaymentRequired(resp *http.Response) (*PaymentRequired, error) {
