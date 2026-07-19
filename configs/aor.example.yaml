@@ -8,6 +8,15 @@ daemon:
   vault_dir: "~/.aor/vaults"
   pid_file:  "~/.aor/daemon.pid"
 
+  # HTTPS interception. When true, CONNECT tunnels are terminated locally so
+  # payments to https:// endpoints run through the x402 rail with full policy
+  # enforcement. The agent must trust the AgentOnRails CA written to ca_dir
+  # (the daemon logs its path on startup — install it in the agent's trust
+  # store). When false (default), HTTPS is tunneled opaquely and no payment or
+  # policy handling applies to https:// traffic.
+  https_intercept: false
+  ca_dir: "~/.aor/ca"
+
 alerts:
   slack_webhook_url: ""       # leave empty to disable Slack notifications
   budget_threshold_pct: 80    # alert when budget reaches this % of limit

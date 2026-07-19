@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -48,17 +49,24 @@ import (
 // ─── Protocol constants ────────────────────────────────────────────────────────
 
 const (
-	// x402 V2 header names (V1 used X-PAYMENT / X-PAYMENT-RESPONSE).
+	// x402 V2 header names.
 	headerPaymentRequired = "PAYMENT-REQUIRED"
 	headerPaymentSig      = "PAYMENT-SIGNATURE"
 	headerPaymentResponse = "PAYMENT-RESPONSE"
+
+	// x402 V1 header names. In V1 the challenge is carried in the 402 JSON body
+	// (no PAYMENT-REQUIRED header); the client replies with the signed payload in
+	// X-PAYMENT and reads the settlement result from X-PAYMENT-RESPONSE.
+	headerV1Payment         = "X-PAYMENT"
+	headerV1PaymentResponse = "X-PAYMENT-RESPONSE"
 
 	// AgentOnRails identification headers set by the agent.
 	headerSentinelAgent = "X-Sentinel-Agent"
 	headerSentinelTask  = "X-Sentinel-Task"
 
-	// x402 protocol version this rail targets.
-	x402Version = 2
+	// x402 protocol versions.
+	x402Version   = 2 // default targeted by this rail
+	x402VersionV1 = 1
 
 	// EIP-3009 transferWithAuthorization type string used in EIP-712 domain.
 	eip3009TypeString = "TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
@@ -119,6 +127,52 @@ type NetworkInfo struct {
 	USDCAddress string // Canonical USDC contract address on this chain
 }
 
+// v1NetworkToCAIP2 maps x402 V1 network slugs (e.g. "base-sepolia") to their
+// CAIP-2 identifiers. V1 challenges name networks by slug; internally the rail
+// works exclusively in CAIP-2, so V1 slugs are normalized on the way in and
+// converted back when emitting a V1 payment payload. Only slugs whose CAIP-2 is
+// in KnownNetworks are listed — anything else is left untouched and rejected
+// later by selectRequirement.
+var v1NetworkToCAIP2 = map[string]string{
+	"ethereum":     "eip155:1",
+	"base":         "eip155:8453",
+	"base-sepolia": "eip155:84532",
+	"polygon":      "eip155:137",
+	"optimism":     "eip155:10",
+	"arbitrum":     "eip155:42161",
+	"avalanche":    "eip155:43114",
+}
+
+// caip2ToV1Network is the reverse of v1NetworkToCAIP2, built at init.
+var caip2ToV1Network = func() map[string]string {
+	m := make(map[string]string, len(v1NetworkToCAIP2))
+	for slug, caip := range v1NetworkToCAIP2 {
+		m[caip] = slug
+	}
+	return m
+}()
+
+// normalizeNetwork converts an x402 V1 network slug to its CAIP-2 identifier.
+// CAIP-2 inputs and unrecognized slugs are returned unchanged.
+func normalizeNetwork(n string) string {
+	if _, ok := KnownNetworks[n]; ok {
+		return n
+	}
+	if caip, ok := v1NetworkToCAIP2[n]; ok {
+		return caip
+	}
+	return n
+}
+
+// v1NetworkName converts a CAIP-2 identifier back to its x402 V1 slug. When no
+// slug is known the CAIP-2 string is returned as a best-effort fallback.
+func v1NetworkName(caip string) string {
+	if slug, ok := caip2ToV1Network[caip]; ok {
+		return slug
+	}
+	return caip
+}
+
 // ─── Wire types (x402 protocol messages) ──────────────────────────────────────
 
 // PaymentRequired is the decoded body of a PAYMENT-REQUIRED header (base64 JSON).
@@ -132,9 +186,12 @@ type PaymentRequired struct {
 
 // PaymentRequirement is one entry in the PaymentRequired.Accepts slice.
 type PaymentRequirement struct {
-	Scheme            string         `json:"scheme"`
-	Network           string         `json:"network"`
-	Amount            string         `json:"amount"`
+	Scheme  string `json:"scheme"`
+	Network string `json:"network"`
+	Amount  string `json:"amount"`
+	// MaxAmountRequired is the x402 V1 spelling of Amount. It is normalized into
+	// Amount after parsing so downstream code only reads Amount.
+	MaxAmountRequired string         `json:"maxAmountRequired,omitempty"`
 	Asset             string         `json:"asset"`
 	PayTo             string         `json:"payTo"`
 	MaxTimeoutSeconds int            `json:"maxTimeoutSeconds"`
@@ -181,6 +238,41 @@ type FacilitatorVerifyRequest struct {
 	PaymentRequirements PaymentRequirement `json:"paymentRequirements"`
 }
 
+// ─── x402 V1 wire types ────────────────────────────────────────────────────────
+// V1 uses a flatter payload than V2: the X-PAYMENT header carries the scheme and
+// network alongside the EIP-3009 proof, and the network is a slug rather than a
+// CAIP-2 identifier.
+
+// v1PaymentPayload is the base64-decoded body of the X-PAYMENT header.
+type v1PaymentPayload struct {
+	X402Version int            `json:"x402Version"`
+	Scheme      string         `json:"scheme"`
+	Network     string         `json:"network"` // V1 slug, e.g. "base-sepolia"
+	Payload     EIP3009Payload `json:"payload"`
+}
+
+// v1PaymentRequirements is the requirement shape a V1 facilitator's /verify
+// endpoint expects (maxAmountRequired, slug network, string resource).
+type v1PaymentRequirements struct {
+	Scheme            string         `json:"scheme"`
+	Network           string         `json:"network"`
+	MaxAmountRequired string         `json:"maxAmountRequired"`
+	Resource          string         `json:"resource"`
+	Description       string         `json:"description"`
+	MimeType          string         `json:"mimeType"`
+	PayTo             string         `json:"payTo"`
+	MaxTimeoutSeconds int            `json:"maxTimeoutSeconds"`
+	Asset             string         `json:"asset"`
+	Extra             map[string]any `json:"extra,omitempty"`
+}
+
+// v1VerifyRequest is the body posted to a V1 facilitator's /verify endpoint.
+type v1VerifyRequest struct {
+	X402Version         int                   `json:"x402Version"`
+	PaymentPayload      v1PaymentPayload      `json:"paymentPayload"`
+	PaymentRequirements v1PaymentRequirements `json:"paymentRequirements"`
+}
+
 // FacilitatorVerifyResponse is the body returned from /verify.
 type FacilitatorVerifyResponse struct {
 	IsValid       bool   `json:"isValid"`
@@ -202,8 +294,8 @@ type PaymentResponse struct {
 // X402Policy defines the spend controls AgentOnRails enforces on behalf of an agent.
 type X402Policy struct {
 	// Wallet
-	WalletAddress string
-	PrivateKey    *ecdsa.PrivateKey
+	WalletAddress  string
+	PrivateKey     *ecdsa.PrivateKey
 	PreferredChain string
 
 	// Facilitator
@@ -240,6 +332,12 @@ type X402Policy struct {
 	VelocityMaxPerMinute    int
 	VelocityMaxPerHour      int
 	VelocityCooldownSeconds int
+
+	// UpstreamTLSConfig overrides the TLS config used for outbound HTTPS calls to
+	// upstreams and facilitators. Normally nil (system trust store). Used to trust
+	// a custom CA or, in tests, a self-signed upstream. It does not affect the
+	// certificate AgentOnRails presents to intercepted clients (that is the MITM CA).
+	UpstreamTLSConfig *tls.Config
 }
 
 // skipPreVerify returns p.SkipPreVerify. Kept as a method for future extension.
@@ -541,17 +639,23 @@ func NewX402Rail(policy *X402Policy, audit AuditLogger, logger *zap.Logger) (*X4
 		policy.PayloadTTL = defaultPayloadTTL
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if policy.UpstreamTLSConfig != nil {
+		transport.TLSClientConfig = policy.UpstreamTLSConfig
+	}
+
 	return &X402Rail{
-		policy:   policy,
-		budget:   NewBudgetTracker(policy),
+		policy: policy,
+		budget: NewBudgetTracker(policy),
 		velocity: NewVelocityLimiter(
 			velocityOrDefault(policy.VelocityMaxPerMinute, 30),
 			velocityOrDefault(policy.VelocityMaxPerHour, 200),
 			velocityOrDefault(policy.VelocityCooldownSeconds, 60),
 		),
-		logger:   logger,
+		logger: logger,
 		httpClient: &http.Client{
-			Timeout: policy.UpstreamTimeout,
+			Timeout:   policy.UpstreamTimeout,
+			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -647,16 +751,20 @@ func (r *X402Rail) ProxyRequest(
 	}
 
 	// ── Step 6: Parse the x402 challenge ─────────────────────────────────────
-	challenge, err := r.parsePaymentRequired(resp)
+	challenge, variant, err := r.parsePaymentRequired(resp)
 	if err != nil {
 		record.BlockReason = "invalid_payment_required_header"
-		r.logger.Warn("malformed PAYMENT-REQUIRED header",
+		r.logger.Warn("malformed x402 challenge",
 			zap.String("url", req.URL.String()),
 			zap.Error(err),
 		)
 		http.Error(w, "aor: upstream sent malformed x402 challenge", http.StatusBadGateway)
 		return
 	}
+	r.logger.Debug("x402 challenge parsed",
+		zap.String("agent", agentID),
+		zap.String("protocol", variant.String()),
+	)
 
 	// ── Step 7: Select best matching requirement ─────────────────────────────
 	chosen, err := r.selectRequirement(challenge)
@@ -736,7 +844,7 @@ func (r *X402Rail) ProxyRequest(
 
 	// ── Step 11: Optional facilitator pre-verification ───────────────────────
 	if !r.policy.skipPreVerify() {
-		if err := r.preVerify(ctx, payload, chosen); err != nil {
+		if err := r.preVerify(ctx, payload, chosen, variant); err != nil {
 			record.BlockReason = "facilitator_pre_verify_failed: " + err.Error()
 			r.logger.Warn("facilitator pre-verify rejected payload", zap.Error(err))
 			http.Error(w, "aor: payment pre-verification failed", http.StatusPaymentRequired)
@@ -745,7 +853,10 @@ func (r *X402Rail) ProxyRequest(
 	}
 
 	// ── Step 12: Retry with payment signature ────────────────────────────────
-	payloadHeader, err := encodePaymentPayload(payload)
+	// The reply format depends on the challenge variant: V2 uses the
+	// PAYMENT-SIGNATURE header with the full payload; V1 uses X-PAYMENT with the
+	// flatter V1 payload shape.
+	paymentHeaderName, paymentHeaderValue, err := encodePaymentForVariant(payload, chosen, variant)
 	if err != nil {
 		record.BlockReason = "payload_encode_error"
 		http.Error(w, "aor: failed to encode payment payload", http.StatusInternalServerError)
@@ -758,7 +869,7 @@ func (r *X402Rail) ProxyRequest(
 		http.Error(w, "aor: internal error", http.StatusInternalServerError)
 		return
 	}
-	retryReq.Header.Set(headerPaymentSig, payloadHeader)
+	retryReq.Header.Set(paymentHeaderName, paymentHeaderValue)
 
 	retryResp, err := r.httpClient.Do(retryReq)
 	if err != nil {
@@ -769,13 +880,19 @@ func (r *X402Rail) ProxyRequest(
 	defer retryResp.Body.Close()
 
 	// ── Step 13: Parse settlement response ───────────────────────────────────
-	if paymentRespHeader := retryResp.Header.Get(headerPaymentResponse); paymentRespHeader != "" {
-		if pr, err := decodePaymentResponse(paymentRespHeader); err == nil {
+	// V2 returns PAYMENT-RESPONSE; V1 returns X-PAYMENT-RESPONSE. Accept either.
+	settlementHeader := retryResp.Header.Get(headerPaymentResponse)
+	if settlementHeader == "" {
+		settlementHeader = retryResp.Header.Get(headerV1PaymentResponse)
+	}
+	if settlementHeader != "" {
+		if pr, err := decodePaymentResponse(settlementHeader); err == nil {
 			record.TxHash = pr.Transaction
 			r.logger.Info("x402 payment settled",
 				zap.String("tx_hash", pr.Transaction),
 				zap.String("payer", pr.Payer),
 				zap.String("network", pr.Network),
+				zap.String("protocol", variant.String()),
 			)
 		}
 	}
@@ -1117,15 +1234,50 @@ func computeEIP712Digest(domainSep, structHash [32]byte) [32]byte {
 
 // ─── Facilitator pre-verification ─────────────────────────────────────────────
 
+// marshalVerifyRequest builds the /verify request body in the shape the
+// facilitator expects for the given protocol variant.
+func marshalVerifyRequest(payload *PaymentPayload, req *PaymentRequirement, variant protoVariant) ([]byte, error) {
+	if variant == protoV1 {
+		resourceURL := ""
+		if payload.Resource != nil {
+			resourceURL = payload.Resource.URL
+		}
+		v1Net := v1NetworkName(req.Network)
+		return json.Marshal(v1VerifyRequest{
+			X402Version: x402VersionV1,
+			PaymentPayload: v1PaymentPayload{
+				X402Version: x402VersionV1,
+				Scheme:      req.Scheme,
+				Network:     v1Net,
+				Payload:     payload.Payload,
+			},
+			PaymentRequirements: v1PaymentRequirements{
+				Scheme:            req.Scheme,
+				Network:           v1Net,
+				MaxAmountRequired: req.Amount,
+				Resource:          resourceURL,
+				Description:       req.Description,
+				MimeType:          req.MimeType,
+				PayTo:             req.PayTo,
+				MaxTimeoutSeconds: req.MaxTimeoutSeconds,
+				Asset:             req.Asset,
+				Extra:             req.Extra,
+			},
+		})
+	}
+	return json.Marshal(FacilitatorVerifyRequest{
+		PaymentPayload:      *payload,
+		PaymentRequirements: *req,
+	})
+}
+
 func (r *X402Rail) preVerify(
 	ctx context.Context,
 	payload *PaymentPayload,
 	req *PaymentRequirement,
+	variant protoVariant,
 ) error {
-	body, err := json.Marshal(FacilitatorVerifyRequest{
-		PaymentPayload:      *payload,
-		PaymentRequirements: *req,
-	})
+	body, err := marshalVerifyRequest(payload, req, variant)
 	if err != nil {
 		return fmt.Errorf("marshal verify request: %w", err)
 	}
@@ -1228,7 +1380,29 @@ func looksLikeX402Challenge(resp *http.Response) bool {
 	return probe.X402Version != 0
 }
 
-func (r *X402Rail) parsePaymentRequired(resp *http.Response) (*PaymentRequired, error) {
+// protoVariant identifies which x402 wire format a challenge arrived in, which
+// determines how AgentOnRails must reply.
+type protoVariant int
+
+const (
+	// protoV2 — challenge in the PAYMENT-REQUIRED header; reply in PAYMENT-SIGNATURE.
+	protoV2 protoVariant = iota
+	// protoV1 — challenge in the 402 JSON body; reply in the X-PAYMENT header.
+	protoV1
+)
+
+func (v protoVariant) String() string {
+	if v == protoV1 {
+		return "v1"
+	}
+	return "v2"
+}
+
+// parsePaymentRequired decodes the 402 challenge and reports which protocol
+// variant it used. A PAYMENT-REQUIRED header means V2; a challenge carried in the
+// JSON body means V1. The returned requirements are normalized to CAIP-2 networks
+// and a populated Amount regardless of variant.
+func (r *X402Rail) parsePaymentRequired(resp *http.Response) (*PaymentRequired, protoVariant, error) {
 	if hdr := resp.Header.Get(headerPaymentRequired); hdr != "" {
 		data, err := base64.StdEncoding.DecodeString(hdr)
 		if err != nil {
@@ -1236,20 +1410,36 @@ func (r *X402Rail) parsePaymentRequired(resp *http.Response) (*PaymentRequired, 
 		}
 		var pr PaymentRequired
 		if err := json.Unmarshal(data, &pr); err != nil {
-			return nil, fmt.Errorf("json unmarshal PAYMENT-REQUIRED: %w", err)
+			return nil, protoV2, fmt.Errorf("json unmarshal PAYMENT-REQUIRED: %w", err)
 		}
-		return &pr, nil
+		normalizeChallenge(&pr)
+		return &pr, protoV2, nil
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return nil, fmt.Errorf("read 402 body: %w", err)
+		return nil, protoV1, fmt.Errorf("read 402 body: %w", err)
 	}
 	var pr PaymentRequired
 	if err := json.Unmarshal(body, &pr); err != nil {
-		return nil, fmt.Errorf("json unmarshal 402 body: %w", err)
+		return nil, protoV1, fmt.Errorf("json unmarshal 402 body: %w", err)
 	}
-	return &pr, nil
+	normalizeChallenge(&pr)
+	return &pr, protoV1, nil
+}
+
+// normalizeChallenge rewrites each requirement into the rail's internal form:
+// CAIP-2 network identifiers and a populated Amount (folding in the V1
+// maxAmountRequired spelling). This lets the selection, pricing, and signing
+// paths stay variant-agnostic.
+func normalizeChallenge(pr *PaymentRequired) {
+	for i := range pr.Accepts {
+		req := &pr.Accepts[i]
+		req.Network = normalizeNetwork(req.Network)
+		if req.Amount == "" && req.MaxAmountRequired != "" {
+			req.Amount = req.MaxAmountRequired
+		}
+	}
 }
 
 func encodePaymentPayload(payload *PaymentPayload) (string, error) {
@@ -1258,6 +1448,31 @@ func encodePaymentPayload(payload *PaymentPayload) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// encodePaymentForVariant produces the payment header name and base64 value the
+// upstream expects for the given protocol variant. V2 → PAYMENT-SIGNATURE with
+// the full payload; V1 → X-PAYMENT with the flatter V1 payload (slug network).
+func encodePaymentForVariant(payload *PaymentPayload, chosen *PaymentRequirement, variant protoVariant) (name, value string, err error) {
+	if variant == protoV1 {
+		v1 := v1PaymentPayload{
+			X402Version: x402VersionV1,
+			Scheme:      chosen.Scheme,
+			Network:     v1NetworkName(chosen.Network),
+			Payload:     payload.Payload,
+		}
+		data, mErr := json.Marshal(v1)
+		if mErr != nil {
+			return "", "", mErr
+		}
+		return headerV1Payment, base64.StdEncoding.EncodeToString(data), nil
+	}
+
+	hdr, eErr := encodePaymentPayload(payload)
+	if eErr != nil {
+		return "", "", eErr
+	}
+	return headerPaymentSig, hdr, nil
 }
 
 func decodePaymentResponse(hdr string) (*PaymentResponse, error) {
@@ -1290,17 +1505,24 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 type ReverseProxyHandler struct {
 	rail    *X402Rail
 	agentID string
+
+	// ca is non-nil when HTTPS interception is enabled. When set, CONNECT
+	// tunnels are terminated locally so https:// payments run through the rail.
+	// When nil, CONNECT falls back to a transparent (blind) TCP tunnel.
+	ca *CA
 }
 
-func NewReverseProxyHandler(rail *X402Rail, agentID string) *ReverseProxyHandler {
-	return &ReverseProxyHandler{rail: rail, agentID: agentID}
+// NewReverseProxyHandler builds the proxy handler. Pass a non-nil ca to enable
+// HTTPS interception; pass nil to keep HTTPS as an opaque passthrough tunnel.
+func NewReverseProxyHandler(rail *X402Rail, agentID string, ca *CA) *ReverseProxyHandler {
+	return &ReverseProxyHandler{rail: rail, agentID: agentID, ca: ca}
 }
 
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// CONNECT requests are used by HTTP clients to establish HTTPS tunnels
-	// (e.g. when HTTPS_PROXY is set). We pass them through as a transparent
-	// TCP tunnel. x402 payment interception is not possible inside a TLS
-	// session, so HTTPS upstream payments are not handled.
+	// (e.g. when HTTPS_PROXY is set). With interception enabled we terminate the
+	// client's TLS session and inspect the plaintext for x402 challenges; without
+	// it we fall back to an opaque byte tunnel (no payment handling on HTTPS).
 	if req.Method == http.MethodConnect {
 		h.handleConnect(w, req)
 		return
@@ -1312,11 +1534,95 @@ func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	h.rail.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
 }
 
-// handleConnect establishes a transparent TCP tunnel for HTTPS CONNECT requests.
-// The proxy pipes raw bytes between the client and the destination without
-// inspecting the TLS payload, so x402 payment handling does not apply to
-// traffic routed through this tunnel.
+// serveInterceptedRequest handles a single plaintext request decrypted from an
+// intercepted TLS tunnel. The request line inside a TLS session is origin-form
+// (path only), so we rebuild the absolute https:// URL from the Host header
+// before handing it to the rail.
+func (h *ReverseProxyHandler) serveInterceptedRequest(w http.ResponseWriter, req *http.Request) {
+	req.URL.Scheme = "https"
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	// RequestURI must be empty when the request is used as an outbound client
+	// request; ProxyRequest rebuilds it, but clear it here to be safe.
+	req.RequestURI = ""
+	taskCtx := req.Header.Get(headerSentinelTask)
+	h.rail.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
+}
+
+// handleConnect services an HTTPS CONNECT request. With interception enabled
+// (h.ca != nil) it terminates the client's TLS session locally and routes the
+// decrypted requests through the x402 rail; otherwise it falls back to an opaque
+// bidirectional TCP tunnel with no payment handling.
 func (h *ReverseProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
+	if h.ca != nil {
+		h.interceptConnect(w, req)
+		return
+	}
+	h.blindTunnel(w, req)
+}
+
+// interceptConnect terminates the client TLS session with a forged certificate,
+// decrypts the tunnel, and serves each inner request through the rail. The agent
+// must trust AgentOnRails' CA for the forged certificate to be accepted.
+func (h *ReverseProxyHandler) interceptConnect(w http.ResponseWriter, req *http.Request) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "aor: CONNECT not supported (hijacking unavailable)", http.StatusInternalServerError)
+		return
+	}
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer clientConn.Close()
+
+	// Tell the client the tunnel is up; the TLS handshake happens next.
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		return
+	}
+
+	// The CONNECT authority is host:port; the cert only needs the host.
+	host := req.Host
+	if h, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+		host = h
+	}
+
+	tlsConn := tls.Server(clientConn, h.ca.tlsConfig(host))
+	if err := tlsConn.Handshake(); err != nil {
+		h.rail.logger.Debug("intercept TLS handshake failed",
+			zap.String("agent", h.agentID),
+			zap.String("host", host),
+			zap.Error(err),
+		)
+		return
+	}
+	defer tlsConn.Close()
+
+	h.rail.logger.Debug("CONNECT intercepted",
+		zap.String("agent", h.agentID),
+		zap.String("host", req.Host),
+	)
+
+	// Serve the decrypted connection with a standard http.Server so we get
+	// keep-alive and correct response framing. The server exits when the client
+	// closes the connection (listener returns net.ErrClosed).
+	ln := newOneShotListener(tlsConn)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(rw http.ResponseWriter, ir *http.Request) {
+			h.serveInterceptedRequest(rw, ir)
+		}),
+		ReadHeaderTimeout: 30 * time.Second,
+		// Reclaim the tunnel goroutine if a kept-alive client goes idle instead
+		// of closing the connection.
+		IdleTimeout: 120 * time.Second,
+	}
+	_ = srv.Serve(ln)
+}
+
+// blindTunnel pipes raw bytes between the client and the destination without
+// inspecting the TLS payload, so x402 payment handling does not apply.
+func (h *ReverseProxyHandler) blindTunnel(w http.ResponseWriter, req *http.Request) {
 	// Dial the destination before hijacking so we can still send an HTTP error
 	// if the connection fails.
 	destConn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(req.Context(), "tcp", req.Host)

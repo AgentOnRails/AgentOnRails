@@ -34,6 +34,7 @@ type Daemon struct {
 	db      *audit.SQLiteAuditLogger
 	alerter *alert.Alerter
 	vault   *vault.Vault
+	ca      *x402.CA // non-nil when HTTPS interception is enabled
 	logger  *zap.Logger
 	servers []*http.Server
 	mu      sync.Mutex
@@ -64,6 +65,26 @@ func New(
 		return nil, fmt.Errorf("daemon: open vault: %w", err)
 	}
 
+	// Any failure after this point must close the audit DB to avoid leaking the
+	// file handle (and, on Windows, a lock on audit.db). Cleared once New succeeds.
+	dbToClose := db
+	defer func() {
+		if dbToClose != nil {
+			dbToClose.Close()
+		}
+	}()
+
+	var ca *x402.CA
+	if cfg.Daemon.HTTPSIntercept {
+		ca, err = x402.LoadOrCreateCA(config.ExpandHomePath(cfg.Daemon.CADir))
+		if err != nil {
+			return nil, fmt.Errorf("daemon: load interception CA: %w", err)
+		}
+		logger.Info("HTTPS interception enabled — install this CA in your agent's trust store",
+			zap.String("ca_cert", ca.CertPath()),
+		)
+	}
+
 	alerter := alert.New(cfg.Alerts.SlackWebhookURL, cfg.Alerts.BudgetThresholdPct, logger)
 
 	d := &Daemon{
@@ -71,6 +92,7 @@ func New(
 		db:      db,
 		alerter: alerter,
 		vault:   v,
+		ca:      ca,
 		logger:  logger,
 	}
 
@@ -120,6 +142,7 @@ func New(
 		d.agents = append(d.agents, &agentRuntime{cfg: agentCfg, rail: rail})
 	}
 
+	dbToClose = nil // ownership transferred to d; keep the DB open
 	return d, nil
 }
 
@@ -179,7 +202,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 }
 
 func (d *Daemon) startAgentServer(ar *agentRuntime) (*http.Server, error) {
-	handler := x402.NewReverseProxyHandler(ar.rail, ar.cfg.AgentID)
+	handler := x402.NewReverseProxyHandler(ar.rail, ar.cfg.AgentID, d.ca)
 	addr := net.JoinHostPort(d.cfg.Daemon.ListenAddr, strconv.Itoa(ar.cfg.ProxyPort))
 
 	srv := &http.Server{

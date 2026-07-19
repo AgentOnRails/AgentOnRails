@@ -192,6 +192,9 @@ func applyGlobalDefaults(cfg *GlobalConfig) {
 	if cfg.Daemon.PIDFile == "" {
 		cfg.Daemon.PIDFile = "~/.aor/daemon.pid"
 	}
+	if cfg.Daemon.CADir == "" {
+		cfg.Daemon.CADir = "~/.aor/ca"
+	}
 	if cfg.Alerts.BudgetThresholdPct == 0 {
 		cfg.Alerts.BudgetThresholdPct = DefaultBudgetThresholdPct
 	}

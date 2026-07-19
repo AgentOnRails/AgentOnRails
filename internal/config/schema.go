@@ -17,6 +17,13 @@ type DaemonConfig struct {
 	AuditDB    string `yaml:"audit_db"`    // path to SQLite file (default: ~/.aor/audit.db)
 	VaultDir   string `yaml:"vault_dir"`   // directory for encrypted wallet files (default: ~/.aor/vaults)
 	PIDFile    string `yaml:"pid_file"`    // PID file path (default: ~/.aor/daemon.pid)
+
+	// HTTPSIntercept enables TLS interception of CONNECT tunnels so payments to
+	// https:// endpoints run through the x402 rail. Requires the agent to trust
+	// the AgentOnRails CA (written to CADir). Default false: HTTPS is tunneled
+	// opaquely with no payment handling.
+	HTTPSIntercept bool   `yaml:"https_intercept"`
+	CADir          string `yaml:"ca_dir"` // directory for the interception CA (default: ~/.aor/ca)
 }
 
 // AlertsConfig controls Slack notifications.

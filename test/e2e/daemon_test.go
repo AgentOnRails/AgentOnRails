@@ -52,7 +52,9 @@ func TestDaemon_HappyPath(t *testing.T) {
 }
 
 // TestDaemon_FreeEndpoint verifies that requests to endpoints that return 200
-// (no 402) are passed through without attempting payment.
+// (no 402) are passed through without attempting payment. The rail still writes
+// one audit record per request (an "allowed", $0 passthrough) so that every
+// proxied request is accounted for.
 func TestDaemon_FreeEndpoint(t *testing.T) {
 	f := startDaemon(t, defaultOpts())
 
@@ -63,11 +65,17 @@ func TestDaemon_FreeEndpoint(t *testing.T) {
 		t.Fatalf("expected 200 for free endpoint, got %d", resp.StatusCode)
 	}
 
-	// No audit records should be written for free endpoints.
+	// A single passthrough record is expected: allowed, no payment.
 	time.Sleep(100 * time.Millisecond)
 	recs := f.recentTxns(t)
-	if len(recs) != 0 {
-		t.Fatalf("expected no audit records for free endpoint, got %d", len(recs))
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 audit record for free endpoint, got %d", len(recs))
+	}
+	if recs[0].Status != "allowed" {
+		t.Fatalf("free endpoint audit status = %q, want allowed", recs[0].Status)
+	}
+	if recs[0].AmountUSD != 0 {
+		t.Fatalf("free endpoint audit amount = %v, want 0", recs[0].AmountUSD)
 	}
 }
 

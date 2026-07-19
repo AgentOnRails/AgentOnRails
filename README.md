@@ -14,7 +14,7 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
 
 - **Transparent proxy** — agents point their HTTP client at a local port; no SDK changes required
 - **MCP server** — exposes payment tools (`request_payment`, `get_balance`, `get_spend_history`, `get_policy`) to Claude Desktop, Claude Code, Cursor, and any MCP-compatible agent
-- **x402 payment rail** — automatically handles HTTP 402 Payment Required challenges: signs EIP-3009 authorizations, pre-verifies with the facilitator, and retries the request
+- **x402 payment rail** — automatically handles HTTP 402 Payment Required challenges: signs EIP-3009 authorizations, pre-verifies with the facilitator, and retries the request. Speaks both x402 protocol variants — the V1 `X-PAYMENT` header format and the newer `PAYMENT-SIGNATURE` header format — replying in whichever the server used
 - **Non-x402 402 passthrough** — plain HTTP 402 responses from Stripe, Cloudflare, Vercel, and other non-x402 APIs are forwarded transparently to the agent instead of being replaced with a 502
 - **Spend guardrails** — per-agent daily/weekly/monthly budgets, per-call maximums, velocity limits, endpoint allowlists/blocklists
 - **Encrypted wallet vault** — private keys never touch disk unencrypted; AES-256-GCM + scrypt
@@ -118,12 +118,23 @@ export HTTPS_PROXY=http://localhost:8402
 
 That's it. Any HTTP client that respects standard proxy env vars works — Python `httpx`/`requests`, Node `fetch`, `curl`, LangChain, CrewAI, etc. No SDK changes required.
 
-> **Note on HTTPS targets:** x402 payment interception works for **plain HTTP** upstream URLs. For HTTPS targets the proxy establishes a transparent CONNECT tunnel — traffic passes through but 402 challenges inside the TLS session are not visible and payments are not handled. Use HTTP endpoints (or a TLS-terminating reverse proxy in front of your API) for x402 payments.
+> **Note on HTTPS targets:** By default, x402 payment interception works for **plain HTTP** upstream URLs. For HTTPS targets the proxy establishes an opaque CONNECT tunnel — traffic passes through but 402 challenges inside the TLS session are not visible and payments are not handled.
+>
+> To handle payments on **HTTPS** endpoints too, enable TLS interception in `aor.yaml`:
+>
+> ```yaml
+> daemon:
+>   https_intercept: true
+>   ca_dir: "~/.aor/ca"
+> ```
+>
+> On startup the daemon generates a local CA and logs its path (`~/.aor/ca/aor-ca.crt`). Install that certificate in your agent's trust store (or point the agent at it, e.g. `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`). AgentOnRails then terminates the client's TLS locally, inspects the decrypted request for x402 challenges, and makes the real HTTPS call upstream itself. The CA private key never leaves the machine. If you prefer not to run interception, use HTTP endpoints, a TLS-terminating reverse proxy in front of your API, or MCP mode.
 
 ```python
 import os, httpx
-# x402 payments handled — use plain HTTP upstream
+# With https_intercept enabled, HTTPS upstreams are handled too.
 os.environ["HTTP_PROXY"] = "http://localhost:8402"
+os.environ["HTTPS_PROXY"] = "http://localhost:8402"
 response = httpx.get("http://api.paid-service.example.com/data")
 # 402 → sign → retry happens transparently
 ```
@@ -279,7 +290,7 @@ get_spend_history since="1h" limit=5
 |---|---|---|
 | Agent changes needed | None — set `HTTP_PROXY` env var | Add server to MCP config |
 | Payment visibility | Transparent (agent doesn't see it) | Explicit tool calls |
-| HTTPS upstream | CONNECT tunnel — no 402 interception | Full HTTPS support |
+| HTTPS upstream | Opaque tunnel by default; full interception with `https_intercept` (install the local CA) | Full HTTPS support |
 | Works with | Any HTTP client | MCP-compatible agents only |
 | Best for | Drop-in adoption, existing agents | Claude Desktop, Claude Code, Cursor |
 
