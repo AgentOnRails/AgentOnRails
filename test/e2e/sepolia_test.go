@@ -38,8 +38,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/agentOnRails/agent-on-rails/internal/audit"
-	"github.com/agentOnRails/agent-on-rails/internal/config"
-	"github.com/agentOnRails/agent-on-rails/internal/daemon"
+	"github.com/agentOnRails/agent-on-rails/config"
+	"github.com/agentOnRails/agent-on-rails/daemon"
 	"github.com/agentOnRails/agent-on-rails/vault"
 )
 

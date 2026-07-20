@@ -18,9 +18,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/agentOnRails/agent-on-rails/config"
 	"github.com/agentOnRails/agent-on-rails/internal/alert"
 	"github.com/agentOnRails/agent-on-rails/internal/audit"
-	"github.com/agentOnRails/agent-on-rails/internal/config"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
 	"github.com/agentOnRails/agent-on-rails/rail"
 	"github.com/agentOnRails/agent-on-rails/vault"
@@ -206,13 +206,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 }
 
 func (d *Daemon) startAgentServer(ar *agentRuntime) (*http.Server, error) {
-	// HTTP proxy serving (including HTTPS interception) is x402-specific today;
-	// a future non-x402 rail would need its own handler construction here.
-	xr, ok := ar.rail.(*x402.X402Rail)
-	if !ok {
-		return nil, fmt.Errorf("daemon: agent %s: rail type does not support proxy serving yet", ar.cfg.AgentID)
-	}
-	handler := x402.NewReverseProxyHandler(xr, ar.cfg.AgentID, d.ca)
+	// The reverse proxy handler (including HTTPS interception) works against
+	// any rail.Rail, not just x402 — this is what lets a wrapper like a
+	// commercial identity_gate rail serve real traffic through the same path.
+	handler := x402.NewReverseProxyHandler(ar.rail, ar.cfg.AgentID, d.ca, d.logger)
 	addr := net.JoinHostPort(d.cfg.Daemon.ListenAddr, strconv.Itoa(ar.cfg.ProxyPort))
 
 	srv := &http.Server{

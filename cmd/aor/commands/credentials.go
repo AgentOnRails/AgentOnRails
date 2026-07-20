@@ -12,7 +12,7 @@ import (
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/agentOnRails/agent-on-rails/internal/config"
+	"github.com/agentOnRails/agent-on-rails/config"
 	"github.com/agentOnRails/agent-on-rails/vault"
 )
 

@@ -10,7 +10,7 @@ build:
 
 ## test: run unit + integration tests (no daemon, no real chain)
 test:
-	$(GOTEST) ./internal/... ./test/integration/
+	$(GOTEST) $$(go list ./... | grep -v /test/e2e)
 
 ## test-e2e: run full daemon e2e tests (mock upstream, no real chain)
 test-e2e:

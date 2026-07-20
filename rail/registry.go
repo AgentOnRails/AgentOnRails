@@ -3,7 +3,7 @@ package rail
 import (
 	"gopkg.in/yaml.v3"
 
-	"github.com/agentOnRails/agent-on-rails/internal/config"
+	"github.com/agentOnRails/agent-on-rails/config"
 	"github.com/agentOnRails/agent-on-rails/vault"
 
 	"go.uber.org/zap"

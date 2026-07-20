@@ -15,7 +15,7 @@ Requires Go 1.24+.
 
 ```bash
 # Unit tests
-go test ./internal/... -count=1 -race
+go test $(go list ./... | grep -v /test/e2e) -count=1 -race
 
 # Integration tests (uses mock servers — no external services required)
 go test ./test/integration/ -v -count=1 -timeout=120s
@@ -27,12 +27,13 @@ TEST_SEPOLIA=1 AOR_TEST_PRIVATE_KEY=0x... go test ./test/e2e/ -run TestSepolia -
 ## Project structure
 
 ```
+rail/                 — Rail plugin interface + registry (public plugin boundary)
+config/               — YAML config loading and validation (public)
+vault/                — AES-256-GCM encrypted wallet key storage (public)
+daemon/               — HTTP proxy daemon (per-agent server lifecycle, public)
 internal/rail/x402/   — x402 payment rail (EIP-3009 signing, proxy logic)
-internal/config/      — YAML config loading and validation
-internal/vault/       — AES-256-GCM encrypted wallet key storage
 internal/audit/       — SQLite audit log
 internal/alert/       — Slack webhook notifications
-internal/daemon/      — HTTP proxy daemon (per-agent server lifecycle)
 cmd/aor/              — CLI (Cobra)
 test/integration/     — Integration tests (guarded by TEST_INTEGRATION=1)
 configs/              — Example configuration files
@@ -48,10 +49,14 @@ configs/              — Example configuration files
 
 ## Adding a new payment rail
 
-1. Create `internal/rail/<name>/rail.go` implementing `AuditLogger` consumer pattern
-2. Add rail config struct to `internal/config/schema.go` under `RailsConfig`
-3. Wire the rail in `internal/daemon/daemon.go`
-4. Add integration tests in `test/integration/`
-5. Update the README roadmap checkbox
+1. Create `internal/rail/<name>/rail.go` implementing the `rail.Rail` interface
+   (`rail/rail.go`) and a `rail.Factory` (`rail/registry.go`)
+2. Register the factory under a unique name from an `init()` in your rail
+   package (`rail.Register("<name>", Factory)`) — the daemon discovers rails
+   by name from each agent's `rails.<name>` YAML block, so nothing in
+   `daemon/daemon.go` needs to change
+3. Add integration tests in `test/integration/`
+4. Update the README roadmap checkbox
 
-See `internal/rail/x402/rail.go` as the reference implementation.
+See `internal/rail/x402/rail.go` and `internal/rail/x402/factory.go` as the
+reference implementation.

@@ -33,7 +33,12 @@ global config file. Safe to run multiple times — existing files are not overwr
 
 		createdCfg := false
 		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-			if err := os.WriteFile(cfgPath, []byte(defaultGlobalConfig(aorDir)), 0600); err != nil {
+			// Forward slashes are valid path separators on every OS Go supports
+			// (including Windows) and, unlike backslashes, don't collide with
+			// YAML's double-quoted-string escape syntax (e.g. "C:\Users\..."
+			// would otherwise fail to parse as "\U" is read as a malformed
+			// \UXXXXXXXX escape).
+			if err := os.WriteFile(cfgPath, []byte(defaultGlobalConfig(filepath.ToSlash(aorDir))), 0600); err != nil {
 				return fmt.Errorf("write config: %w", err)
 			}
 			createdCfg = true

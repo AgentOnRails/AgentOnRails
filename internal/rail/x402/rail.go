@@ -1320,10 +1320,16 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 
 // ─── Reverse proxy adapter ────────────────────────────────────────────────────
 
-// ReverseProxyHandler wraps the X402Rail as an http.Handler.
+// ReverseProxyHandler wraps any rail.Rail as an http.Handler. It is not
+// x402-specific: HTTPS interception (CONNECT handling) decrypts traffic
+// before handing each request to whatever rail is configured for the agent,
+// so a card/ACH rail or an identity-gated wrapper (e.g. the commercial
+// identity_gate rail) serves real traffic through the exact same path x402
+// does — the daemon just needs any rail.Rail, not a *X402Rail.
 type ReverseProxyHandler struct {
-	rail    *X402Rail
+	inner   rail.Rail
 	agentID string
+	logger  *zap.Logger
 
 	// ca is non-nil when HTTPS interception is enabled. When set, CONNECT
 	// tunnels are terminated locally so https:// payments run through the rail.
@@ -1331,10 +1337,11 @@ type ReverseProxyHandler struct {
 	ca *CA
 }
 
-// NewReverseProxyHandler builds the proxy handler. Pass a non-nil ca to enable
-// HTTPS interception; pass nil to keep HTTPS as an opaque passthrough tunnel.
-func NewReverseProxyHandler(rail *X402Rail, agentID string, ca *CA) *ReverseProxyHandler {
-	return &ReverseProxyHandler{rail: rail, agentID: agentID, ca: ca}
+// NewReverseProxyHandler builds the proxy handler for any rail.Rail. Pass a
+// non-nil ca to enable HTTPS interception; pass nil to keep HTTPS as an
+// opaque passthrough tunnel.
+func NewReverseProxyHandler(inner rail.Rail, agentID string, ca *CA, logger *zap.Logger) *ReverseProxyHandler {
+	return &ReverseProxyHandler{inner: inner, agentID: agentID, ca: ca, logger: logger}
 }
 
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -1350,7 +1357,7 @@ func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	// agentID is always taken from the handler (set at proxy startup), not from
 	// the request header — allowing clients to override it would corrupt audit logs.
 	taskCtx := req.Header.Get(headerSentinelTask)
-	h.rail.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
+	h.inner.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
 }
 
 // serveInterceptedRequest handles a single plaintext request decrypted from an
@@ -1366,7 +1373,7 @@ func (h *ReverseProxyHandler) serveInterceptedRequest(w http.ResponseWriter, req
 	// request; ProxyRequest rebuilds it, but clear it here to be safe.
 	req.RequestURI = ""
 	taskCtx := req.Header.Get(headerSentinelTask)
-	h.rail.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
+	h.inner.ProxyRequest(req.Context(), w, req, h.agentID, taskCtx)
 }
 
 // handleConnect services an HTTPS CONNECT request. With interception enabled
@@ -1409,7 +1416,7 @@ func (h *ReverseProxyHandler) interceptConnect(w http.ResponseWriter, req *http.
 
 	tlsConn := tls.Server(clientConn, h.ca.tlsConfig(host))
 	if err := tlsConn.Handshake(); err != nil {
-		h.rail.logger.Debug("intercept TLS handshake failed",
+		h.logger.Debug("intercept TLS handshake failed",
 			zap.String("agent", h.agentID),
 			zap.String("host", host),
 			zap.Error(err),
@@ -1418,7 +1425,7 @@ func (h *ReverseProxyHandler) interceptConnect(w http.ResponseWriter, req *http.
 	}
 	defer tlsConn.Close()
 
-	h.rail.logger.Debug("CONNECT intercepted",
+	h.logger.Debug("CONNECT intercepted",
 		zap.String("agent", h.agentID),
 		zap.String("host", req.Host),
 	)
@@ -1465,7 +1472,7 @@ func (h *ReverseProxyHandler) blindTunnel(w http.ResponseWriter, req *http.Reque
 	defer clientConn.Close()
 	defer destConn.Close()
 
-	h.rail.logger.Debug("CONNECT tunnel opened",
+	h.logger.Debug("CONNECT tunnel opened",
 		zap.String("agent", h.agentID),
 		zap.String("host", req.Host),
 	)

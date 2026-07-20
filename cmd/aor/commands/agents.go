@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/agentOnRails/agent-on-rails/internal/config"
+	"github.com/agentOnRails/agent-on-rails/config"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
 )
 

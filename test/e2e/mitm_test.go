@@ -101,7 +101,7 @@ func TestMITM_HTTPSInterception(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create CA: %v", err)
 	}
-	proxy := httptest.NewServer(x402.NewReverseProxyHandler(rail, "mitm-agent", ca))
+	proxy := httptest.NewServer(x402.NewReverseProxyHandler(rail, "mitm-agent", ca, zap.NewNop()))
 	defer proxy.Close()
 
 	// ── Client: routes through the proxy, trusts the AgentOnRails CA ─────────
@@ -204,7 +204,7 @@ func TestMITM_PolicyEnforcedOverHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create CA: %v", err)
 	}
-	proxy := httptest.NewServer(x402.NewReverseProxyHandler(rail, "mitm-agent", ca))
+	proxy := httptest.NewServer(x402.NewReverseProxyHandler(rail, "mitm-agent", ca, zap.NewNop()))
 	defer proxy.Close()
 
 	caPool := x509.NewCertPool()
