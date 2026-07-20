@@ -1,5 +1,5 @@
 // Package audit provides the SQLite-backed audit log for AgentOnRails.
-// It implements the x402.AuditLogger interface and also exposes query helpers
+// It implements the rail.AuditLogger interface and also exposes query helpers
 // used by the CLI spend/audit commands.
 package audit
 
@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
 
-	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
+	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
 // SQLiteAuditLogger writes transaction records to a SQLite database.
@@ -43,8 +43,8 @@ func NewSQLiteAuditLogger(path string) (*SQLiteAuditLogger, error) {
 // Close releases the database connection.
 func (a *SQLiteAuditLogger) Close() error { return a.db.Close() }
 
-// LogTransaction implements x402.AuditLogger.
-func (a *SQLiteAuditLogger) LogTransaction(tx x402.TransactionRecord) error {
+// LogTransaction implements rail.AuditLogger.
+func (a *SQLiteAuditLogger) LogTransaction(tx rail.TransactionRecord) error {
 	_, err := a.db.Exec(`
 		INSERT INTO transactions
 		  (id, agent_id, timestamp, rail_type, endpoint, method,
@@ -137,13 +137,13 @@ func (a *SQLiteAuditLogger) PersistBudget(agentID string, states []BudgetPeriodS
 
 // TransactionRow is returned by QueryTransactions.
 type TransactionRow struct {
-	x402.TransactionRecord
+	rail.TransactionRecord
 }
 
 // QueryTransactions returns recent transactions for agentID, newest first.
 // If agentID is empty, transactions for all agents are returned.
 // since=0 means no lower bound on timestamp.
-func (a *SQLiteAuditLogger) QueryTransactions(agentID string, since time.Time, limit int) ([]x402.TransactionRecord, error) {
+func (a *SQLiteAuditLogger) QueryTransactions(agentID string, since time.Time, limit int) ([]rail.TransactionRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -173,9 +173,9 @@ func (a *SQLiteAuditLogger) QueryTransactions(agentID string, since time.Time, l
 	}
 	defer rows.Close()
 
-	var txns []x402.TransactionRecord
+	var txns []rail.TransactionRecord
 	for rows.Next() {
-		var t x402.TransactionRecord
+		var t rail.TransactionRecord
 		var tsUnix int64
 		if err := rows.Scan(
 			&t.ID, &t.AgentID, &tsUnix, &t.RailType, &t.Endpoint, &t.Method,

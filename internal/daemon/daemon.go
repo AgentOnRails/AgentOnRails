@@ -12,19 +12,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"go.uber.org/zap"
 
 	"github.com/agentOnRails/agent-on-rails/internal/alert"
 	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/internal/config"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
-	"github.com/agentOnRails/agent-on-rails/internal/vault"
+	"github.com/agentOnRails/agent-on-rails/rail"
+	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
 // Daemon manages per-agent HTTP proxy servers.
@@ -43,7 +42,7 @@ type Daemon struct {
 // agentRuntime holds the live state for a single agent.
 type agentRuntime struct {
 	cfg  *config.AgentConfig
-	rail *x402.X402Rail
+	rail rail.Rail
 }
 
 // New creates a Daemon from configuration. Use Start() to begin serving.
@@ -97,49 +96,54 @@ func New(
 	}
 
 	for _, agentCfg := range agents {
-		if agentCfg.Rails.X402 == nil || !agentCfg.Rails.X402.Enabled {
+		var active rail.Rail
+		var activeRailName string
+
+		for railName, rawCfg := range agentCfg.Rails {
+			factory, ok := rail.Get(railName)
+			if !ok {
+				return nil, fmt.Errorf("daemon: agent %s: unknown rail %q", agentCfg.AgentID, railName)
+			}
+
+			r, enabled, err := factory(rail.FactoryParams{
+				AgentID:    agentCfg.AgentID,
+				RawConfig:  rawCfg,
+				Global:     cfg,
+				Vault:      v,
+				Passphrase: passphrase,
+				Audit:      db,
+				Logger:     logger,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("daemon: build rail %q for %s: %w", railName, agentCfg.AgentID, err)
+			}
+			if !enabled {
+				continue
+			}
+			if active != nil {
+				return nil, fmt.Errorf("daemon: agent %s: multiple active rails not yet supported (%s and %s)",
+					agentCfg.AgentID, activeRailName, railName)
+			}
+			active = r
+			activeRailName = railName
+		}
+
+		if active == nil {
 			continue
 		}
 
-		policy, err := config.BuildX402Policy(cfg, agentCfg)
-		if err != nil {
-			return nil, fmt.Errorf("daemon: build policy for %s: %w", agentCfg.AgentID, err)
-		}
-
-		key, err := v.LoadKey(agentCfg.AgentID, passphrase)
-		if err != nil {
-			return nil, fmt.Errorf("daemon: load wallet for %s: %w (run `aor credentials set-wallet`)", agentCfg.AgentID, err)
-		}
-
-		// Confirm the loaded key matches the wallet_address in config so that
-		// EIP-3009 signatures have the correct `from` address.
-		derivedAddr := ethcrypto.PubkeyToAddress(key.PublicKey).Hex()
-		if !strings.EqualFold(derivedAddr, policy.WalletAddress) {
-			return nil, fmt.Errorf(
-				"daemon: wallet key mismatch for agent %s: key derives to %s but config wallet_address is %s — update config or re-run `aor credentials set-wallet`",
-				agentCfg.AgentID, derivedAddr, policy.WalletAddress,
-			)
-		}
-
-		policy.PrivateKey = key
-
-		rail, err := x402.NewX402Rail(policy, db, logger)
-		if err != nil {
-			return nil, fmt.Errorf("daemon: create x402 rail for %s: %w", agentCfg.AgentID, err)
-		}
-
 		// Wire budget threshold alert callback.
-		rail.Budget().OnThreshold = alerter.BudgetThresholdCallback(agentCfg.AgentID)
+		active.Budget().OnThreshold = alerter.BudgetThresholdCallback(agentCfg.AgentID)
 
 		// Rehydrate budget from persistent audit state.
-		if err := d.rehydrateBudget(agentCfg.AgentID, rail); err != nil {
+		if err := d.rehydrateBudget(agentCfg.AgentID, active); err != nil {
 			logger.Warn("budget rehydration failed",
 				zap.String("agent", agentCfg.AgentID),
 				zap.Error(err),
 			)
 		}
 
-		d.agents = append(d.agents, &agentRuntime{cfg: agentCfg, rail: rail})
+		d.agents = append(d.agents, &agentRuntime{cfg: agentCfg, rail: active})
 	}
 
 	dbToClose = nil // ownership transferred to d; keep the DB open
@@ -202,7 +206,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 }
 
 func (d *Daemon) startAgentServer(ar *agentRuntime) (*http.Server, error) {
-	handler := x402.NewReverseProxyHandler(ar.rail, ar.cfg.AgentID, d.ca)
+	// HTTP proxy serving (including HTTPS interception) is x402-specific today;
+	// a future non-x402 rail would need its own handler construction here.
+	xr, ok := ar.rail.(*x402.X402Rail)
+	if !ok {
+		return nil, fmt.Errorf("daemon: agent %s: rail type does not support proxy serving yet", ar.cfg.AgentID)
+	}
+	handler := x402.NewReverseProxyHandler(xr, ar.cfg.AgentID, d.ca)
 	addr := net.JoinHostPort(d.cfg.Daemon.ListenAddr, strconv.Itoa(ar.cfg.ProxyPort))
 
 	srv := &http.Server{
@@ -282,14 +292,14 @@ func (d *Daemon) persistAllBudgets() {
 	}
 }
 
-func (d *Daemon) rehydrateBudget(agentID string, rail *x402.X402Rail) error {
+func (d *Daemon) rehydrateBudget(agentID string, r rail.Rail) error {
 	states, err := d.db.RehydrateBudget(agentID)
 	if err != nil {
 		return err
 	}
 	for _, s := range states {
 		if time.Now().UTC().Before(s.ResetAt) {
-			rail.Budget().Seed(s.Period, s.SpentCents)
+			r.Budget().Seed(s.Period, s.SpentCents)
 		}
 	}
 	return nil

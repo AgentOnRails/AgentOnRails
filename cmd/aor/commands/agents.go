@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/agentOnRails/agent-on-rails/internal/config"
+	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
 )
 
 var agentsCmd = &cobra.Command{
@@ -34,12 +35,11 @@ var agentsListCmd = &cobra.Command{
 			x402Enabled := "disabled"
 			chain := "-"
 			mode := "-"
-			if a.Rails.X402 != nil && a.Rails.X402.Enabled {
-				x402Enabled = "enabled"
-				chain = a.Rails.X402.PreferredChain
-				mode = a.Rails.X402.EndpointMode
-				if mode == "" {
-					mode = "open"
+			if rawCfg, ok := a.Rails["x402"]; ok {
+				if rc, err := x402.ParseRailConfig(rawCfg); err == nil && rc.Enabled {
+					x402Enabled = "enabled"
+					chain = rc.PreferredChain
+					mode = rc.EndpointMode
 				}
 			}
 			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n",

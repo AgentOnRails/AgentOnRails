@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
+	arail "github.com/agentOnRails/agent-on-rails/rail"
 )
 
 // TestMITM_HTTPSInterception drives a full HTTPS payment through the proxy's
@@ -89,7 +90,7 @@ func TestMITM_HTTPSInterception(t *testing.T) {
 		UpstreamTLSConfig:  &tls.Config{RootCAs: upstreamPool},
 	}
 
-	var logged []x402.TransactionRecord
+	var logged []arail.TransactionRecord
 	rail, err := x402.NewX402Rail(policy, &sliceAuditLogger{records: &logged}, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +194,7 @@ func TestMITM_PolicyEnforcedOverHTTPS(t *testing.T) {
 		UpstreamTLSConfig:  &tls.Config{RootCAs: upstreamPool},
 	}
 
-	var logged []x402.TransactionRecord
+	var logged []arail.TransactionRecord
 	rail, err := x402.NewX402Rail(policy, &sliceAuditLogger{records: &logged}, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
@@ -234,10 +235,10 @@ func TestMITM_PolicyEnforcedOverHTTPS(t *testing.T) {
 
 // sliceAuditLogger captures transaction records for assertions.
 type sliceAuditLogger struct {
-	records *[]x402.TransactionRecord
+	records *[]arail.TransactionRecord
 }
 
-func (s *sliceAuditLogger) LogTransaction(tx x402.TransactionRecord) error {
+func (s *sliceAuditLogger) LogTransaction(tx arail.TransactionRecord) error {
 	*s.records = append(*s.records, tx)
 	return nil
 }

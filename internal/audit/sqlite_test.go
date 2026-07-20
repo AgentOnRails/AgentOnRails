@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
+	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
 func newTestLogger(t *testing.T) *SQLiteAuditLogger {
@@ -23,7 +23,7 @@ func newTestLogger(t *testing.T) *SQLiteAuditLogger {
 func TestLogTransaction(t *testing.T) {
 	l := newTestLogger(t)
 
-	tx := x402.TransactionRecord{
+	tx := rail.TransactionRecord{
 		ID:        "test-uuid-1",
 		AgentID:   "agent1",
 		Timestamp: time.Now().UTC(),
@@ -63,7 +63,7 @@ func TestSpendSummary(t *testing.T) {
 	l := newTestLogger(t)
 
 	for i, status := range []string{"allowed", "allowed", "blocked"} {
-		tx := x402.TransactionRecord{
+		tx := rail.TransactionRecord{
 			ID:        fmt.Sprintf("tx-%d", i),
 			AgentID:   "agent1",
 			Timestamp: time.Now().UTC(),

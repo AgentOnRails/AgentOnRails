@@ -11,7 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
+	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
 // Alerter sends notifications to a Slack webhook. All methods are no-ops when
@@ -59,7 +59,7 @@ func (a *Alerter) AlertBudgetThreshold(agentID, period string, pctUsed float64) 
 }
 
 // AlertTransaction sends a notification for a completed x402 payment.
-func (a *Alerter) AlertTransaction(agentID string, tx x402.TransactionRecord) {
+func (a *Alerter) AlertTransaction(agentID string, tx rail.TransactionRecord) {
 	if a.WebhookURL == "" {
 		return
 	}
@@ -71,7 +71,7 @@ func (a *Alerter) AlertTransaction(agentID string, tx x402.TransactionRecord) {
 }
 
 // BudgetThresholdCallback returns a function suitable for use as
-// x402.BudgetTracker.OnThreshold. The agentID is captured in the closure.
+// rail.BudgetTracker.OnThreshold. The agentID is captured in the closure.
 func (a *Alerter) BudgetThresholdCallback(agentID string) func(period string, pctUsed float64) {
 	return func(period string, pctUsed float64) {
 		a.AlertBudgetThreshold(agentID, period, pctUsed)

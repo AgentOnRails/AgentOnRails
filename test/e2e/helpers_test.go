@@ -33,7 +33,8 @@ import (
 	"github.com/agentOnRails/agent-on-rails/internal/config"
 	"github.com/agentOnRails/agent-on-rails/internal/daemon"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
-	"github.com/agentOnRails/agent-on-rails/internal/vault"
+	"github.com/agentOnRails/agent-on-rails/rail"
+	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
 const testPassphrase = "e2e-test-passphrase"
@@ -168,7 +169,7 @@ rails:
 	if err != nil {
 		t.Fatalf("create vault: %v", err)
 	}
-	if err := v.StoreKey("e2e-agent", testPassphrase, key); err != nil {
+	if err := v.StoreKey("e2e-agent", testPassphrase, ethcrypto.FromECDSA(key)); err != nil {
 		t.Fatalf("store key: %v", err)
 	}
 
@@ -255,7 +256,7 @@ func (f *daemonFixture) doRequestTo(t *testing.T, rawURL string) *http.Response 
 }
 
 // recentTxns returns audit records for e2e-agent written in the last minute.
-func (f *daemonFixture) recentTxns(t *testing.T) []x402.TransactionRecord {
+func (f *daemonFixture) recentTxns(t *testing.T) []rail.TransactionRecord {
 	t.Helper()
 	txns, err := f.AuditDB.QueryTransactions("e2e-agent", time.Now().Add(-time.Minute), 100)
 	if err != nil {

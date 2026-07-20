@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -114,6 +115,9 @@ func (s *server) handlePaid(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	txHash := fmt.Sprintf("0xtestserver%x", time.Now().UnixNano())
+	network := s.network
+
 	if s.verify {
 		req := paymentRequirement{
 			Scheme:            "exact",
@@ -129,13 +133,32 @@ func (s *server) handlePaid(w http.ResponseWriter, r *http.Request) {
 			s.send402(w)
 			return
 		}
+
+		// Verify only checks the signature is well-formed. Settle is the call
+		// that actually broadcasts the EIP-3009 transfer on-chain — without it
+		// no money moves, even against mainnet.
+		settleResp, err := s.callFacilitatorSettle(sig, req)
+		if err != nil {
+			log.Printf("testserver: facilitator settle failed: %v", err)
+			s.send402(w)
+			return
+		}
+		if !settleResp.Success {
+			log.Printf("testserver: facilitator settle rejected: %s", settleResp.ErrorReason)
+			s.send402(w)
+			return
+		}
+		txHash = settleResp.Transaction
+		if settleResp.Network != "" {
+			network = settleResp.Network
+		}
+		log.Printf("testserver: settled on-chain, tx=%s network=%s", txHash, network)
 	}
 
-	txHash := fmt.Sprintf("0xtestserver%x", time.Now().UnixNano())
 	resp := map[string]any{
 		"success":     true,
 		"transaction": txHash,
-		"network":     s.network,
+		"network":     network,
 	}
 	data, _ := json.Marshal(resp)
 	respJSON, _ := json.Marshal(resp)
@@ -206,6 +229,62 @@ func (s *server) callFacilitatorVerify(sig string, req paymentRequirement) error
 		return fmt.Errorf("facilitator returned HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// facilitatorSettleResp is the JSON body returned from the facilitator's
+// /settle endpoint. Mirrors PaymentResponse in internal/rail/x402/rail.go,
+// which is what the paying client decodes from the PAYMENT-RESPONSE header.
+type facilitatorSettleResp struct {
+	Success     bool   `json:"success"`
+	Transaction string `json:"transaction"`
+	Network     string `json:"network"`
+	Payer       string `json:"payer,omitempty"`
+	ErrorReason string `json:"errorReason,omitempty"`
+}
+
+// callFacilitatorSettle calls <facilitator>/settle, which actually broadcasts
+// the EIP-3009 transferWithAuthorization on-chain and returns the real tx hash.
+func (s *server) callFacilitatorSettle(sig string, req paymentRequirement) (*facilitatorSettleResp, error) {
+	payloadBytes, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil {
+		return nil, fmt.Errorf("decode payment signature: %w", err)
+	}
+
+	body, err := json.Marshal(facilitatorVerifyReq{
+		PaymentPayload:      json.RawMessage(payloadBytes),
+		PaymentRequirements: req,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal settle request: %w", err)
+	}
+
+	settleURL := strings.TrimRight(s.facilitator, "/") + "/settle"
+	httpReq, err := http.NewRequest(http.MethodPost, settleURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("facilitator unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read settle response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("facilitator /settle returned HTTP %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var settleResp facilitatorSettleResp
+	if err := json.Unmarshal(respBytes, &settleResp); err != nil {
+		return nil, fmt.Errorf("decode settle response: %w (body: %s)", err, string(respBytes))
+	}
+	return &settleResp, nil
 }
 
 // keys returns the map keys as a sorted slice (for error messages).

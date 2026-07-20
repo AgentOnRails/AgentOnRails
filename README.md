@@ -460,6 +460,20 @@ The Sepolia tests make real on-chain USDC transfers (~$0.02 total). Use a dedica
 
 ---
 
+## Licensing & Commercial Offerings
+
+The x402 payment rail and this core proxy — the CLI, budget/policy
+enforcement, the audit log, and the `Rail` plugin interface — are
+Apache-2.0 and stay free and open source forever. Anyone can self-host,
+audit, and use this repository commercially at no cost.
+
+Additional payment rails (card, ACH, Lightning/L402), a privacy rail,
+per-agent cryptographic identity, and the GUI cockpit backend are part of a
+separate commercial offering, distributed outside this repository. See
+`docs/ROADMAP.md` for the full plan.
+
+---
+
 ## Roadmap
 
 - [x] x402 crypto rail (Base, Ethereum, Optimism, Arbitrum, Polygon)

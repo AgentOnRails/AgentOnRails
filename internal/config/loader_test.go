@@ -6,50 +6,10 @@ import (
 	"testing"
 )
 
-func TestParseDollarsToCents(t *testing.T) {
-	tests := []struct {
-		input    string
-		want     int64
-		wantErr  bool
-	}{
-		{"", 0, false},
-		{"0", 0, false},
-		{"1.00", 100, false},
-		{"0.10", 10, false},
-		{"0.01", 1, false},
-		{"10.50", 1050, false},
-		{"-1.00", 0, true},
-		{"abc", 0, true},
-	}
-	for _, tt := range tests {
-		got, err := parseDollarsToCents(tt.input)
-		if tt.wantErr {
-			if err == nil {
-				t.Errorf("parseDollarsToCents(%q): expected error, got nil", tt.input)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("parseDollarsToCents(%q): unexpected error: %v", tt.input, err)
-			continue
-		}
-		if got != tt.want {
-			t.Errorf("parseDollarsToCents(%q) = %d, want %d", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestValidateAgent(t *testing.T) {
 	valid := &AgentConfig{
 		AgentID:   "test-agent",
 		ProxyPort: 8402,
-		Rails: RailsConfig{
-			X402: &X402RailConfig{
-				Enabled:       true,
-				WalletAddress: "0x1234567890abcdef1234567890abcdef12345678",
-				EndpointMode:  "open",
-			},
-		},
 	}
 	if err := validateAgent(valid); err != nil {
 		t.Errorf("unexpected error for valid config: %v", err)
@@ -65,12 +25,6 @@ func TestValidateAgent(t *testing.T) {
 	badPort.ProxyPort = 0
 	if err := validateAgent(&badPort); err == nil {
 		t.Error("expected error for port 0")
-	}
-
-	badMode := *valid
-	badMode.Rails.X402.EndpointMode = "invalid"
-	if err := validateAgent(&badMode); err == nil {
-		t.Error("expected error for invalid endpoint_mode")
 	}
 }
 
@@ -104,10 +58,20 @@ rails:
 	if cfg.AgentID != "test-agent" {
 		t.Errorf("AgentID = %q, want %q", cfg.AgentID, "test-agent")
 	}
-	if cfg.Rails.X402 == nil {
-		t.Fatal("X402 rail config is nil")
+
+	node, ok := cfg.Rails["x402"]
+	if !ok {
+		t.Fatal("rails.x402 is missing")
 	}
-	if cfg.Rails.X402.DailyLimitUSD != "5.00" {
-		t.Errorf("DailyLimitUSD = %q, want %q", cfg.Rails.X402.DailyLimitUSD, "5.00")
+	// Rail-specific decoding (defaults, validation) is tested in the x402
+	// package itself; here we only confirm the raw node round-trips.
+	var probe struct {
+		DailyLimitUSD string `yaml:"daily_limit_usd"`
+	}
+	if err := node.Decode(&probe); err != nil {
+		t.Fatalf("decode rails.x402: %v", err)
+	}
+	if probe.DailyLimitUSD != "5.00" {
+		t.Errorf("DailyLimitUSD = %q, want %q", probe.DailyLimitUSD, "5.00")
 	}
 }

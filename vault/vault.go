@@ -1,20 +1,20 @@
-// Package vault manages AES-256-GCM encrypted wallet key files for AgentOnRails.
+// Package vault manages AES-256-GCM encrypted key files for AgentOnRails.
 // Keys are derived from a passphrase using scrypt, stored per-agent in the vault
-// directory, and held in memory only during daemon runtime.
+// directory, and held in memory only during daemon runtime. The vault itself is
+// key-type-agnostic — it stores and returns raw bytes; callers are responsible
+// for marshalling their own key material (an ECDSA wallet key, an ed25519
+// identity key, etc.) to and from bytes.
 package vault
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -47,18 +47,16 @@ func (v *Vault) AgentVaultPath(agentID string) string {
 	return filepath.Join(v.dir, agentID, "wallet.enc")
 }
 
-// StoreKey encrypts key with passphrase and writes it to the vault.
-// The file is created with mode 0600 (owner read/write only).
-func (v *Vault) StoreKey(agentID, passphrase string, key *ecdsa.PrivateKey) error {
+// StoreKey encrypts keyBytes with passphrase and writes it to the vault.
+// The file is created with mode 0600 (owner read/write only). keyBytes is
+// caller-defined — e.g. an ECDSA private key's raw bytes, or an ed25519 seed.
+func (v *Vault) StoreKey(agentID, passphrase string, keyBytes []byte) error {
 	agentDir := filepath.Join(v.dir, agentID)
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		return fmt.Errorf("vault: mkdir %s: %w", agentDir, err)
 	}
 
-	// Private key as 32-byte hex string (same format as go-ethereum's keystore)
-	plaintext := []byte(hex.EncodeToString(ethcrypto.FromECDSA(key)))
-
-	ciphertext, err := encrypt(plaintext, passphrase)
+	ciphertext, err := encrypt(keyBytes, passphrase)
 	if err != nil {
 		return fmt.Errorf("vault: encrypt: %w", err)
 	}
@@ -70,29 +68,19 @@ func (v *Vault) StoreKey(agentID, passphrase string, key *ecdsa.PrivateKey) erro
 	return nil
 }
 
-// LoadKey decrypts and returns the private key for agentID.
-func (v *Vault) LoadKey(agentID, passphrase string) (*ecdsa.PrivateKey, error) {
+// LoadKey decrypts and returns the raw key bytes for agentID.
+func (v *Vault) LoadKey(agentID, passphrase string) ([]byte, error) {
 	path := v.AgentVaultPath(agentID)
 	ciphertext, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("vault: read %s: %w", path, err)
 	}
 
-	plaintext, err := decrypt(ciphertext, passphrase)
+	keyBytes, err := decrypt(ciphertext, passphrase)
 	if err != nil {
 		return nil, fmt.Errorf("vault: decrypt for agent %s: %w (wrong passphrase?)", agentID, err)
 	}
-
-	keyBytes, err := hex.DecodeString(string(plaintext))
-	if err != nil {
-		return nil, fmt.Errorf("vault: decode key hex: %w", err)
-	}
-
-	key, err := ethcrypto.ToECDSA(keyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("vault: parse private key: %w", err)
-	}
-	return key, nil
+	return keyBytes, nil
 }
 
 // HasKey returns true if an encrypted wallet file exists for agentID.

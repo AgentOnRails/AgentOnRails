@@ -40,7 +40,7 @@ import (
 	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/internal/config"
 	"github.com/agentOnRails/agent-on-rails/internal/daemon"
-	"github.com/agentOnRails/agent-on-rails/internal/vault"
+	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
 const (
@@ -181,7 +181,7 @@ rails:
 		t.Fatalf("create vault: %v", err)
 	}
 	const sepoliaPassphrase = "sepolia-test-passphrase"
-	if err := v.StoreKey("sepolia-agent", sepoliaPassphrase, key); err != nil {
+	if err := v.StoreKey("sepolia-agent", sepoliaPassphrase, ethcrypto.FromECDSA(key)); err != nil {
 		t.Fatalf("store key: %v", err)
 	}
 

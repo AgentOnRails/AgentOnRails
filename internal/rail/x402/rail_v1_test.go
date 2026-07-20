@@ -11,6 +11,8 @@ import (
 	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
+	arail "github.com/agentOnRails/agent-on-rails/rail"
 )
 
 // TestNormalizeNetwork checks V1 slug → CAIP-2 conversion and pass-through.
@@ -95,7 +97,7 @@ func TestProxyRequest_V1Challenge_RepliesWithXPayment(t *testing.T) {
 		SkipPreVerify:      true, // exercise the reply path without a live facilitator
 	}
 
-	var logged []TransactionRecord
+	var logged []arail.TransactionRecord
 	rail, err := NewX402Rail(policy, &capturingAuditLogger{records: &logged}, noopLogger())
 	if err != nil {
 		t.Fatal(err)

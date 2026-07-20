@@ -1,7 +1,11 @@
 // Package config loads and validates AgentOnRails YAML configuration files.
 package config
 
-import "time"
+import (
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
 
 // GlobalConfig represents aor.yaml — the daemon-level configuration.
 type GlobalConfig struct {
@@ -44,46 +48,12 @@ type AgentConfig struct {
 	Rails     RailsConfig `yaml:"rails"`
 }
 
-// RailsConfig holds per-rail configuration blocks.
-type RailsConfig struct {
-	X402 *X402RailConfig `yaml:"x402,omitempty"`
-	// Card and Bank rails reserved for Phase 2.
-}
-
-// X402RailConfig is the YAML shape for the x402 rail under rails.x402.
-type X402RailConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	WalletAddress string `yaml:"wallet_address"`
-	PreferredChain string `yaml:"preferred_chain"` // CAIP-2 e.g. "eip155:8453"
-
-	PerCallMaxUSD  string `yaml:"per_call_max_usd"`  // decimal string e.g. "0.10"
-	DailyLimitUSD  string `yaml:"daily_limit_usd"`
-	WeeklyLimitUSD string `yaml:"weekly_limit_usd"`
-	MonthlyLimitUSD string `yaml:"monthly_limit_usd"`
-
-	EndpointMode    string   `yaml:"endpoint_mode"` // open | allowlist | blocklist
-	AllowedHosts    []string `yaml:"allowed_hosts"`
-	BlockedHosts    []string `yaml:"blocked_hosts"`
-	AllowedNetworks []string `yaml:"allowed_networks"`
-
-	RequireApprovalAboveUSD string `yaml:"require_approval_above_usd"`
-
-	SkipPreVerify bool `yaml:"skip_pre_verify"`
-
-	Velocity VelocityConfig `yaml:"velocity"`
-
-	// Timeouts (optional overrides)
-	UpstreamTimeoutSec    int `yaml:"upstream_timeout_sec"`
-	FacilitatorTimeoutSec int `yaml:"facilitator_timeout_sec"`
-	PayloadTTLSec         int `yaml:"payload_ttl_sec"`
-}
-
-// VelocityConfig limits request rate for an agent.
-type VelocityConfig struct {
-	MaxPerMinute    int `yaml:"max_per_minute"`
-	MaxPerHour      int `yaml:"max_per_hour"`
-	CooldownSeconds int `yaml:"cooldown_seconds"`
-}
+// RailsConfig holds per-rail configuration blocks, keyed by registered rail
+// name (e.g. "x402"). Each rail decodes its own block from the raw YAML node
+// via rail.Register — this repo does not need to know a rail's config shape
+// ahead of time, so externally-registered (commercial) rails can plug in
+// without changing this struct.
+type RailsConfig map[string]yaml.Node
 
 // defaults applied when fields are zero/empty.
 const (

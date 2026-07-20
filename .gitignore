@@ -4,6 +4,7 @@
 
 # Local IDE / Claude Code config
 .claude/
+.mcp.json
 
 # SQLite databases
 *.db

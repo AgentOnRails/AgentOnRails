@@ -37,6 +37,7 @@ import (
 // Server wraps the MCP toolset for a single AgentOnRails agent.
 type Server struct {
 	agentCfg *config.AgentConfig
+	railCfg  *x402.X402RailConfig
 	policy   *x402.X402Policy
 	rail     *x402.X402Rail
 	auditDB  *audit.SQLiteAuditLogger
@@ -46,6 +47,7 @@ type Server struct {
 // New creates an MCP Server. policy must already have PrivateKey populated.
 func New(
 	agentCfg *config.AgentConfig,
+	railCfg *x402.X402RailConfig,
 	policy *x402.X402Policy,
 	rail *x402.X402Rail,
 	auditDB *audit.SQLiteAuditLogger,
@@ -53,6 +55,7 @@ func New(
 ) *Server {
 	return &Server{
 		agentCfg: agentCfg,
+		railCfg:  railCfg,
 		policy:   policy,
 		rail:     rail,
 		auditDB:  auditDB,
@@ -413,7 +416,7 @@ type velocityPolicy struct {
 
 func (s *Server) handleGetPolicy(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	p := s.policy
-	rc := s.agentCfg.Rails.X402
+	rc := s.railCfg
 
 	maxPerMin := config.DefaultMaxPerMinute
 	maxPerHour := config.DefaultMaxPerHour

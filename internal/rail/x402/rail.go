@@ -44,6 +44,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"go.uber.org/zap"
+
+	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
 // ─── Protocol constants ────────────────────────────────────────────────────────
@@ -353,167 +355,6 @@ type ApprovalRequest struct {
 	TaskContext string
 }
 
-// ─── Budget tracker ────────────────────────────────────────────────────────────
-
-// BudgetTracker maintains rolling spend windows. All methods are safe for concurrent use.
-// It does NOT persist to disk — it is rehydrated from the SQLite audit log at startup.
-type BudgetTracker struct {
-	mu      sync.Mutex
-	windows []budgetWindow
-
-	// OnThreshold is called after a successful Reserve when any window crosses
-	// the alert threshold. agentID, period, and pctUsed are provided for alerting.
-	OnThreshold func(period string, pctUsed float64)
-}
-
-type budgetWindow struct {
-	period     string // "daily" | "weekly" | "monthly"
-	limitCents int64
-	spentCents int64
-	resetAt    time.Time
-}
-
-// NewBudgetTracker creates a tracker initialised with the policy limits.
-func NewBudgetTracker(policy *X402Policy) *BudgetTracker {
-	now := time.Now().UTC()
-	return &BudgetTracker{
-		windows: []budgetWindow{
-			{
-				period:     "daily",
-				limitCents: policy.DailyLimitCents,
-				spentCents: 0,
-				resetAt:    now.Truncate(24 * time.Hour).Add(24 * time.Hour),
-			},
-			{
-				period:     "weekly",
-				limitCents: policy.WeeklyLimitCents,
-				spentCents: 0,
-				resetAt:    nextWeekStart(now),
-			},
-			{
-				period:     "monthly",
-				limitCents: policy.MonthlyLimitCents,
-				spentCents: 0,
-				resetAt:    nextMonthStart(now),
-			},
-		},
-	}
-}
-
-// Reserve atomically checks whether amountCents fits in all active windows and,
-// if so, debits it. Returns an error naming the first exceeded period.
-// If the check fails no debit is applied (all-or-nothing).
-func (b *BudgetTracker) Reserve(amountCents int64) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	now := time.Now().UTC()
-	for i := range b.windows {
-		w := &b.windows[i]
-		if now.After(w.resetAt) {
-			w.spentCents = 0
-			switch w.period {
-			case "daily":
-				w.resetAt = now.Truncate(24 * time.Hour).Add(24 * time.Hour)
-			case "weekly":
-				w.resetAt = nextWeekStart(now)
-			case "monthly":
-				w.resetAt = nextMonthStart(now)
-			}
-		}
-		if w.limitCents > 0 && w.spentCents+amountCents > w.limitCents {
-			return fmt.Errorf("%s budget exceeded: spent %d + %d > limit %d (cents)",
-				w.period, w.spentCents, amountCents, w.limitCents)
-		}
-	}
-
-	for i := range b.windows {
-		b.windows[i].spentCents += amountCents
-	}
-
-	// Fire threshold callbacks after the debit.
-	if b.OnThreshold != nil {
-		for _, w := range b.windows {
-			if w.limitCents > 0 {
-				pct := float64(w.spentCents) / float64(w.limitCents) * 100
-				b.OnThreshold(w.period, pct)
-			}
-		}
-	}
-
-	return nil
-}
-
-// Refund subtracts amountCents from all windows without performing a limit check.
-// Used to undo a Reserve when a payment fails after signing.
-func (b *BudgetTracker) Refund(amountCents int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i := range b.windows {
-		b.windows[i].spentCents -= amountCents
-		if b.windows[i].spentCents < 0 {
-			b.windows[i].spentCents = 0
-		}
-	}
-}
-
-// SpentThisPeriod returns the current spend for the named period.
-func (b *BudgetTracker) SpentThisPeriod(period string) int64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, w := range b.windows {
-		if w.period == period {
-			return w.spentCents
-		}
-	}
-	return 0
-}
-
-// Seed sets the initial spent value for a period (used during startup rehydration).
-func (b *BudgetTracker) Seed(period string, spentCents int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i := range b.windows {
-		if b.windows[i].period == period {
-			b.windows[i].spentCents = spentCents
-			return
-		}
-	}
-}
-
-// BudgetSnapshot is a point-in-time copy of one budget window, used for
-// persistence across daemon restarts.
-type BudgetSnapshot struct {
-	Period     string
-	SpentCents int64
-	ResetAt    time.Time
-}
-
-// Snapshot returns the current state of all budget windows. Safe for concurrent use.
-func (b *BudgetTracker) Snapshot() []BudgetSnapshot {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]BudgetSnapshot, len(b.windows))
-	for i, w := range b.windows {
-		out[i] = BudgetSnapshot{Period: w.period, SpentCents: w.spentCents, ResetAt: w.resetAt}
-	}
-	return out
-}
-
-func nextWeekStart(t time.Time) time.Time {
-	weekday := int(t.Weekday())
-	if weekday == 0 {
-		weekday = 7
-	}
-	daysUntilMonday := 8 - weekday
-	return t.Truncate(24 * time.Hour).Add(time.Duration(daysUntilMonday) * 24 * time.Hour)
-}
-
-func nextMonthStart(t time.Time) time.Time {
-	y, m, _ := t.Date()
-	return time.Date(y, m+1, 1, 0, 0, 0, 0, time.UTC)
-}
-
 // ─── Velocity limiter ──────────────────────────────────────────────────────────
 
 // VelocityLimiter tracks request counts in a sliding window. Safe for concurrent use.
@@ -585,44 +426,22 @@ func filterAfter(ts []time.Time, after time.Time) []time.Time {
 
 // ─── x402 Rail ────────────────────────────────────────────────────────────────
 
-// X402Rail is the payment rail adapter for x402 crypto payments.
+// X402Rail is the payment rail adapter for x402 crypto payments. It satisfies
+// the rail.Rail interface.
 type X402Rail struct {
 	policy     *X402Policy
-	budget     *BudgetTracker
+	budget     *rail.BudgetTracker
 	velocity   *VelocityLimiter
 	logger     *zap.Logger
 	httpClient *http.Client
-	auditLog   AuditLogger
+	auditLog   rail.AuditLogger
 }
 
-// AuditLogger is the interface the rail uses to write transaction records.
-// Implemented by the SQLite audit backend in the audit package.
-type AuditLogger interface {
-	LogTransaction(tx TransactionRecord) error
-}
-
-// TransactionRecord is written to the audit DB for every request.
-type TransactionRecord struct {
-	ID          string
-	AgentID     string
-	Timestamp   time.Time
-	RailType    string
-	Endpoint    string
-	Method      string
-	AmountUSD   float64
-	AmountRaw   string
-	Asset       string
-	Network     string
-	TxHash      string
-	Status      string // "allowed" | "blocked" | "failed"
-	BlockReason string
-	TaskContext string
-	LatencyMS   int64
-}
+var _ rail.Rail = (*X402Rail)(nil)
 
 // NewX402Rail creates a rail from a policy. The policy must already have a
 // populated PrivateKey (decrypted from wallet.enc by the daemon's vault).
-func NewX402Rail(policy *X402Policy, audit AuditLogger, logger *zap.Logger) (*X402Rail, error) {
+func NewX402Rail(policy *X402Policy, audit rail.AuditLogger, logger *zap.Logger) (*X402Rail, error) {
 	if policy.PrivateKey == nil {
 		return nil, errors.New("x402 rail: private key is nil — wallet not loaded")
 	}
@@ -645,8 +464,8 @@ func NewX402Rail(policy *X402Policy, audit AuditLogger, logger *zap.Logger) (*X4
 	}
 
 	return &X402Rail{
-		policy: policy,
-		budget: NewBudgetTracker(policy),
+		policy:   policy,
+		budget:   rail.NewBudgetTracker(policy.DailyLimitCents, policy.WeeklyLimitCents, policy.MonthlyLimitCents),
 		velocity: NewVelocityLimiter(
 			velocityOrDefault(policy.VelocityMaxPerMinute, 30),
 			velocityOrDefault(policy.VelocityMaxPerHour, 200),
@@ -665,7 +484,7 @@ func NewX402Rail(policy *X402Policy, audit AuditLogger, logger *zap.Logger) (*X4
 }
 
 // Budget returns the rail's BudgetTracker (used by the daemon for rehydration).
-func (r *X402Rail) Budget() *BudgetTracker { return r.budget }
+func (r *X402Rail) Budget() *rail.BudgetTracker { return r.budget }
 
 // ProxyRequest is the main entry point. The daemon calls this for every inbound
 // request routed to the x402 rail.
@@ -677,7 +496,7 @@ func (r *X402Rail) ProxyRequest(
 	taskContext string,
 ) {
 	start := time.Now()
-	record := TransactionRecord{
+	record := rail.TransactionRecord{
 		ID:          newUUID(),
 		AgentID:     agentID,
 		Timestamp:   start,

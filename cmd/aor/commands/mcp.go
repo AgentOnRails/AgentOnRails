@@ -14,7 +14,7 @@ import (
 	"github.com/agentOnRails/agent-on-rails/internal/config"
 	aormcp "github.com/agentOnRails/agent-on-rails/internal/mcp"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
-	"github.com/agentOnRails/agent-on-rails/internal/vault"
+	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
 var (
@@ -68,11 +68,19 @@ The wallet passphrase can be supplied via --passphrase or AOR_PASSPHRASE.`,
 			return fmt.Errorf("load agent %q: %w\n(run `aor agents list` to see configured agents)", mcpAgentID, err)
 		}
 
-		if agentCfg.Rails.X402 == nil || !agentCfg.Rails.X402.Enabled {
+		rawCfg, ok := agentCfg.Rails["x402"]
+		if !ok {
+			return fmt.Errorf("agent %q does not have rails.x402 configured", mcpAgentID)
+		}
+		railCfg, err := x402.ParseRailConfig(rawCfg)
+		if err != nil {
+			return fmt.Errorf("parse rails.x402: %w", err)
+		}
+		if !railCfg.Enabled {
 			return fmt.Errorf("agent %q does not have the x402 rail enabled — set rails.x402.enabled: true", mcpAgentID)
 		}
 
-		policy, err := config.BuildX402Policy(global, agentCfg)
+		policy, err := x402.BuildPolicy(global.Facilitators.X402, railCfg)
 		if err != nil {
 			return fmt.Errorf("build policy: %w", err)
 		}
@@ -82,9 +90,13 @@ The wallet passphrase can be supplied via --passphrase or AOR_PASSPHRASE.`,
 			return fmt.Errorf("open vault: %w", err)
 		}
 
-		key, err := v.LoadKey(mcpAgentID, mcpPassphrase)
+		keyBytes, err := v.LoadKey(mcpAgentID, mcpPassphrase)
 		if err != nil {
 			return fmt.Errorf("load wallet for %q: %w\n(run `aor credentials set-wallet %s` to store the key)", mcpAgentID, err, mcpAgentID)
+		}
+		key, err := ethcrypto.ToECDSA(keyBytes)
+		if err != nil {
+			return fmt.Errorf("parse wallet key for %q: %w", mcpAgentID, err)
 		}
 
 		derivedAddr := ethcrypto.PubkeyToAddress(key.PublicKey).Hex()
@@ -124,7 +136,7 @@ The wallet passphrase can be supplied via --passphrase or AOR_PASSPHRASE.`,
 			}
 		}
 
-		srv := aormcp.New(agentCfg, policy, rail, db, logger)
+		srv := aormcp.New(agentCfg, railCfg, policy, rail, db, logger)
 		return srv.ServeStdio(context.Background())
 	},
 }

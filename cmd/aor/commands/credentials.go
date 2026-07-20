@@ -13,7 +13,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/agentOnRails/agent-on-rails/internal/config"
-	"github.com/agentOnRails/agent-on-rails/internal/vault"
+	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
 var credentialsCmd = &cobra.Command{
@@ -70,7 +70,7 @@ The passphrase must match the one used when starting the daemon (AOR_PASSPHRASE)
 			return fmt.Errorf("passphrases do not match")
 		}
 
-		if err := v.StoreKey(agentID, pass, key); err != nil {
+		if err := v.StoreKey(agentID, pass, ethcrypto.FromECDSA(key)); err != nil {
 			return fmt.Errorf("store key: %w", err)
 		}
 

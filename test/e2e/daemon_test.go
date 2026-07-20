@@ -18,7 +18,7 @@ import (
 	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/internal/config"
 	"github.com/agentOnRails/agent-on-rails/internal/daemon"
-	"github.com/agentOnRails/agent-on-rails/internal/vault"
+	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
 // TestDaemon_HappyPath starts a full daemon and makes a real proxied request
@@ -265,7 +265,7 @@ rails:
 	if err != nil {
 		t.Fatalf("create vault: %v", err)
 	}
-	if err := v.StoreKey("e2e-agent", "correct-passphrase", key); err != nil {
+	if err := v.StoreKey("e2e-agent", "correct-passphrase", ethcrypto.FromECDSA(key)); err != nil {
 		t.Fatalf("store key: %v", err)
 	}
 
@@ -430,7 +430,7 @@ rails:
 	if err != nil {
 		t.Fatalf("create vault: %v", err)
 	}
-	if err := v.StoreKey("e2e-agent", testPassphrase, key); err != nil {
+	if err := v.StoreKey("e2e-agent", testPassphrase, ethcrypto.FromECDSA(key)); err != nil {
 		t.Fatalf("store key: %v", err)
 	}
 
