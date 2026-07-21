@@ -46,6 +46,7 @@ var logsTailCmd = &cobra.Command{
 			fmt.Print("Tailing audit log for all agents (Ctrl+C to stop)...\n\n")
 		}
 
+		fmt.Println("(status is truncated to fit the table — run `aor audit <agent>` for the full block reason)")
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "TIME\tAGENT\tSTATUS\tAMOUNT\tENDPOINT\tTX")
 		tw.Flush()
@@ -95,7 +96,7 @@ var logsTailCmd = &cobra.Command{
 
 					status := t.Status
 					if t.BlockReason != "" {
-						status = fmt.Sprintf("%s (%s)", t.Status, truncate(t.BlockReason, 30))
+						status = fmt.Sprintf("%s (%s)", t.Status, truncate(t.BlockReason, 100))
 					}
 
 					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",

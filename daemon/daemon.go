@@ -102,7 +102,7 @@ func New(
 		for railName, rawCfg := range agentCfg.Rails {
 			factory, ok := rail.Get(railName)
 			if !ok {
-				return nil, fmt.Errorf("daemon: agent %s: unknown rail %q", agentCfg.AgentID, railName)
+				return nil, fmt.Errorf("daemon: agent %s: unknown rail %q (not registered in this binary — if this is a commercial/paid rail, run the binary that registers it instead, e.g. aor-pro, and make sure its package is blank-imported before daemon.New is called)", agentCfg.AgentID, railName)
 			}
 
 			r, enabled, err := factory(rail.FactoryParams{

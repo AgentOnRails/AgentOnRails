@@ -42,15 +42,43 @@ func New(dir string) (*Vault, error) {
 	return &Vault{dir: dir}, nil
 }
 
-// AgentVaultPath returns the path of the encrypted key file for agentID.
+// walletKeyName is the key name StoreKey/LoadKey/HasKey/AgentVaultPath use —
+// kept as the literal "wallet" so their on-disk filename (wallet.enc) and
+// behavior are unchanged for existing callers (the x402 rail).
+const walletKeyName = "wallet"
+
+// AgentVaultPath returns the path of the encrypted wallet key file for agentID.
 func (v *Vault) AgentVaultPath(agentID string) string {
-	return filepath.Join(v.dir, agentID, "wallet.enc")
+	return v.namedKeyPath(agentID, walletKeyName)
 }
 
-// StoreKey encrypts keyBytes with passphrase and writes it to the vault.
-// The file is created with mode 0600 (owner read/write only). keyBytes is
-// caller-defined — e.g. an ECDSA private key's raw bytes, or an ed25519 seed.
+func (v *Vault) namedKeyPath(agentID, keyName string) string {
+	return filepath.Join(v.dir, agentID, keyName+".enc")
+}
+
+// StoreKey encrypts keyBytes with passphrase and writes it to the vault as
+// agentID's wallet key. Equivalent to StoreNamedKey(agentID, "wallet", ...).
 func (v *Vault) StoreKey(agentID, passphrase string, keyBytes []byte) error {
+	return v.StoreNamedKey(agentID, walletKeyName, passphrase, keyBytes)
+}
+
+// LoadKey decrypts and returns agentID's wallet key bytes. Equivalent to
+// LoadNamedKey(agentID, "wallet", ...).
+func (v *Vault) LoadKey(agentID, passphrase string) ([]byte, error) {
+	return v.LoadNamedKey(agentID, walletKeyName, passphrase)
+}
+
+// HasKey returns true if agentID has an encrypted wallet key stored.
+func (v *Vault) HasKey(agentID string) bool {
+	return v.HasNamedKey(agentID, walletKeyName)
+}
+
+// StoreNamedKey encrypts keyBytes with passphrase and writes it under
+// <agentID>/<keyName>.enc — a second secret (e.g. a card rail's Stripe API
+// key) can live alongside the wallet key for the same agent without
+// colliding, since each key name gets its own file. The file is created with
+// mode 0600 (owner read/write only). keyBytes is caller-defined.
+func (v *Vault) StoreNamedKey(agentID, keyName, passphrase string, keyBytes []byte) error {
 	agentDir := filepath.Join(v.dir, agentID)
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		return fmt.Errorf("vault: mkdir %s: %w", agentDir, err)
@@ -61,16 +89,16 @@ func (v *Vault) StoreKey(agentID, passphrase string, keyBytes []byte) error {
 		return fmt.Errorf("vault: encrypt: %w", err)
 	}
 
-	path := v.AgentVaultPath(agentID)
+	path := v.namedKeyPath(agentID, keyName)
 	if err := os.WriteFile(path, ciphertext, 0600); err != nil {
 		return fmt.Errorf("vault: write %s: %w", path, err)
 	}
 	return nil
 }
 
-// LoadKey decrypts and returns the raw key bytes for agentID.
-func (v *Vault) LoadKey(agentID, passphrase string) ([]byte, error) {
-	path := v.AgentVaultPath(agentID)
+// LoadNamedKey decrypts and returns the raw bytes stored under keyName for agentID.
+func (v *Vault) LoadNamedKey(agentID, keyName, passphrase string) ([]byte, error) {
+	path := v.namedKeyPath(agentID, keyName)
 	ciphertext, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("vault: read %s: %w", path, err)
@@ -78,14 +106,14 @@ func (v *Vault) LoadKey(agentID, passphrase string) ([]byte, error) {
 
 	keyBytes, err := decrypt(ciphertext, passphrase)
 	if err != nil {
-		return nil, fmt.Errorf("vault: decrypt for agent %s: %w (wrong passphrase?)", agentID, err)
+		return nil, fmt.Errorf("vault: decrypt %s for agent %s: %w (wrong passphrase?)", keyName, agentID, err)
 	}
 	return keyBytes, nil
 }
 
-// HasKey returns true if an encrypted wallet file exists for agentID.
-func (v *Vault) HasKey(agentID string) bool {
-	_, err := os.Stat(v.AgentVaultPath(agentID))
+// HasNamedKey returns true if an encrypted file named keyName exists for agentID.
+func (v *Vault) HasNamedKey(agentID, keyName string) bool {
+	_, err := os.Stat(v.namedKeyPath(agentID, keyName))
 	return err == nil
 }
 

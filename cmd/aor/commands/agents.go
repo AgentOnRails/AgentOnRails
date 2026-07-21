@@ -174,6 +174,10 @@ var agentsCreateCmd = &cobra.Command{
 		fmt.Println("  aor start")
 		fmt.Printf("  export HTTP_PROXY=http://localhost:%d\n", port)
 		fmt.Println("  aor logs tail")
+		fmt.Println()
+		fmt.Println("Note: if you later add a paid/commercial rail block to this file by hand,")
+		fmt.Println("you'll need that rail's own binary to start the daemon — the OSS aor binary")
+		fmt.Println("only knows about the rails built into this repo.")
 		return nil
 	},
 }

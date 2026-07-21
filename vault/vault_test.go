@@ -90,6 +90,62 @@ func TestHasKey(t *testing.T) {
 	}
 }
 
+func TestNamedKey_CoexistsWithWalletKey(t *testing.T) {
+	// A second secret (e.g. a card rail's Stripe API key) must round-trip
+	// independently of the same agent's wallet key, not collide on disk.
+	dir := t.TempDir()
+	v, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	walletKey, _ := ethcrypto.GenerateKey()
+	walletBytes := ethcrypto.FromECDSA(walletKey)
+	if err := v.StoreKey("agent-a", "pass", walletBytes); err != nil {
+		t.Fatalf("StoreKey: %v", err)
+	}
+
+	stripeKey := []byte("sk_test_51ABC...")
+	if err := v.StoreNamedKey("agent-a", "stripe_secret_key", "pass", stripeKey); err != nil {
+		t.Fatalf("StoreNamedKey: %v", err)
+	}
+
+	loadedWallet, err := v.LoadKey("agent-a", "pass")
+	if err != nil {
+		t.Fatalf("LoadKey: %v", err)
+	}
+	if !bytes.Equal(loadedWallet, walletBytes) {
+		t.Error("wallet key was overwritten or corrupted by storing a named key")
+	}
+
+	loadedStripe, err := v.LoadNamedKey("agent-a", "stripe_secret_key", "pass")
+	if err != nil {
+		t.Fatalf("LoadNamedKey: %v", err)
+	}
+	if !bytes.Equal(loadedStripe, stripeKey) {
+		t.Error("loaded named key does not match stored named key")
+	}
+}
+
+func TestHasNamedKey(t *testing.T) {
+	dir := t.TempDir()
+	v, _ := New(dir)
+
+	if v.HasNamedKey("agent-a", "stripe_secret_key") {
+		t.Error("HasNamedKey should return false before StoreNamedKey")
+	}
+	if err := v.StoreNamedKey("agent-a", "stripe_secret_key", "pass", []byte("sk_test_x")); err != nil {
+		t.Fatal(err)
+	}
+	if !v.HasNamedKey("agent-a", "stripe_secret_key") {
+		t.Error("HasNamedKey should return true after StoreNamedKey")
+	}
+	// HasKey (the wallet key) is unaffected by a different named key existing.
+	if v.HasKey("agent-a") {
+		t.Error("HasKey should not report true just because a differently-named key exists")
+	}
+}
+
 func TestEncryptDecryptRoundtrip(t *testing.T) {
 	plaintext := []byte("secret private key material")
 	passphrase := "passphrase"
