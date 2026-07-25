@@ -49,8 +49,8 @@ func (a *SQLiteAuditLogger) LogTransaction(tx rail.TransactionRecord) error {
 		INSERT INTO transactions
 		  (id, agent_id, timestamp, rail_type, endpoint, method,
 		   amount_usd, amount_raw, asset, network, tx_hash,
-		   status, block_reason, task_context, latency_ms)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   status, block_reason, task_context, caller_did, latency_ms)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		tx.ID,
 		tx.AgentID,
 		tx.Timestamp.Unix(),
@@ -65,6 +65,7 @@ func (a *SQLiteAuditLogger) LogTransaction(tx rail.TransactionRecord) error {
 		tx.Status,
 		tx.BlockReason,
 		tx.TaskContext,
+		tx.CallerDID,
 		tx.LatencyMS,
 	)
 	if err != nil {
@@ -164,7 +165,7 @@ func (a *SQLiteAuditLogger) QueryTransactions(agentID string, since time.Time, l
 	rows, err := a.db.Query(`
 		SELECT id, agent_id, timestamp, rail_type, endpoint, method,
 		       amount_usd, amount_raw, asset, network, tx_hash,
-		       status, block_reason, task_context, latency_ms
+		       status, block_reason, task_context, caller_did, latency_ms
 		FROM transactions `+where+`
 		ORDER BY timestamp DESC
 		LIMIT ?`, args...)
@@ -180,7 +181,7 @@ func (a *SQLiteAuditLogger) QueryTransactions(agentID string, since time.Time, l
 		if err := rows.Scan(
 			&t.ID, &t.AgentID, &tsUnix, &t.RailType, &t.Endpoint, &t.Method,
 			&t.AmountUSD, &t.AmountRaw, &t.Asset, &t.Network, &t.TxHash,
-			&t.Status, &t.BlockReason, &t.TaskContext, &t.LatencyMS,
+			&t.Status, &t.BlockReason, &t.TaskContext, &t.CallerDID, &t.LatencyMS,
 		); err != nil {
 			return nil, err
 		}
@@ -222,6 +223,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     status       TEXT    NOT NULL,
     block_reason TEXT    NOT NULL DEFAULT '',
     task_context TEXT    NOT NULL DEFAULT '',
+    caller_did   TEXT    NOT NULL DEFAULT '',
     latency_ms   INTEGER NOT NULL DEFAULT 0
 );
 
@@ -247,6 +249,48 @@ CREATE TABLE IF NOT EXISTS violations (
 CREATE INDEX IF NOT EXISTS idx_violations_agent_ts
     ON violations (agent_id, timestamp DESC);
 `
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	return addColumnIfMissing(db, "transactions", "caller_did", "TEXT NOT NULL DEFAULT ''")
+}
+
+// addColumnIfMissing adds column to table if it isn't already present —
+// CREATE TABLE IF NOT EXISTS above is a no-op against a database created by
+// an older schema version, so new columns need their own idempotent
+// migration step. Checked via PRAGMA table_info rather than a blind ALTER
+// TABLE + ignore-the-error, since SQLite's "duplicate column" error text
+// isn't a stable thing to match against across driver versions.
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("audit: inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  any
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			return fmt.Errorf("audit: scan %s schema: %w", table, err)
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
+	if err != nil {
+		return fmt.Errorf("audit: add column %s.%s: %w", table, column, err)
+	}
+	return nil
 }

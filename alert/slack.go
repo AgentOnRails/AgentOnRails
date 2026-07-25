@@ -1,4 +1,8 @@
-// Package alert sends Slack webhook notifications for AgentOnRails policy events.
+// Package alert sends Slack webhook notifications for AgentOnRails policy
+// events. Promoted out of internal/ (the same move rail/vault/config/daemon
+// already got) so a commercial rail — one built in the private repo, unable
+// to import anything under this repo's internal/ by Go's own enforcement —
+// can reuse this rather than reimplementing Slack notifications itself.
 package alert
 
 import (
@@ -66,6 +70,23 @@ func (a *Alerter) AlertTransaction(agentID string, tx rail.TransactionRecord) {
 	msg := slackMessage{
 		Text: fmt.Sprintf(":white_check_mark: *[AgentOnRails]* Payment settled\n*Agent:* `%s`\n*Endpoint:* `%s`\n*Amount:* `$%.4f`\n*Network:* `%s`\n*TxHash:* `%s`",
 			agentID, tx.Endpoint, tx.AmountUSD, tx.Network, tx.TxHash),
+	}
+	a.send(msg)
+}
+
+// AlertPolicyViolation sends a notification for a policy-engine event that
+// doesn't fit AlertBlock/AlertBudgetThreshold/AlertTransaction's more
+// specific shapes — e.g. a commercial rail's own redaction/content policy,
+// not a payment guardrail. source names which policy engine raised it (e.g.
+// "cargo") so multiple modules can share this one method without their
+// notifications looking identical in Slack.
+func (a *Alerter) AlertPolicyViolation(agentID, source, rule, detail string) {
+	if a.WebhookURL == "" {
+		return
+	}
+	msg := slackMessage{
+		Text: fmt.Sprintf(":triangular_flag_on_post: *[AgentOnRails/%s]* Policy alert\n*Agent:* `%s`\n*Rule:* `%s`\n*Detail:* `%s`",
+			source, agentID, rule, detail),
 	}
 	a.send(msg)
 }

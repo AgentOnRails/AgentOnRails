@@ -3,6 +3,7 @@ package rail
 import (
 	"gopkg.in/yaml.v3"
 
+	"github.com/agentOnRails/agent-on-rails/approval"
 	"github.com/agentOnRails/agent-on-rails/config"
 	"github.com/agentOnRails/agent-on-rails/vault"
 
@@ -20,6 +21,14 @@ type FactoryParams struct {
 	Passphrase string
 	Audit      AuditLogger
 	Logger     *zap.Logger
+	// Approvals is the daemon-wide pending-approval registry (see package
+	// approval) — a rail whose policy holds a payment for human sign-off
+	// (e.g. x402's require_approval_above_usd) calls Approvals.Await instead
+	// of failing closed with nothing to route the decision to. nil in
+	// contexts that don't wire one up (e.g. some tests), in which case a
+	// rail should behave as if no approver is configured, exactly as before
+	// this field existed.
+	Approvals *approval.Registry
 }
 
 // Factory builds a Rail for one agent from FactoryParams. It returns

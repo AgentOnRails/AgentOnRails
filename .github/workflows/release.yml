@@ -24,7 +24,7 @@ jobs:
           cache: true
 
       - name: Run tests before release
-        run: go test ./internal/... -count=1 -race -timeout=120s
+        run: go test -count=1 -race -timeout=120s $(go list ./... | grep -v /test/e2e)
 
       - name: Run goreleaser
         uses: goreleaser/goreleaser-action@v6

@@ -106,15 +106,19 @@ const (
 // unknown or unconfigured network even if the amount passes policy checks.
 var KnownNetworks = map[string]NetworkInfo{
 	// EVM mainnet
-	"eip155:1":     {ChainID: 1, Name: "Ethereum Mainnet", USDCAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"},
-	"eip155:8453":  {ChainID: 8453, Name: "Base", USDCAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"},
+	// RPCURL is only populated where a well-known, stable public endpoint is
+	// available with confidence — it's only consulted by the "upto" scheme's
+	// allowance preflight, and an empty value there just fails that preflight
+	// closed with a clear error rather than guessing at a possibly-stale URL.
+	"eip155:1":     {ChainID: 1, Name: "Ethereum Mainnet", USDCAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", RPCURL: "https://cloudflare-eth.com"},
+	"eip155:8453":  {ChainID: 8453, Name: "Base", USDCAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", RPCURL: "https://mainnet.base.org"},
 	"eip155:137":   {ChainID: 137, Name: "Polygon", USDCAddress: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"},
 	"eip155:10":    {ChainID: 10, Name: "Optimism", USDCAddress: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"},
 	"eip155:42161": {ChainID: 42161, Name: "Arbitrum One", USDCAddress: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"},
 	"eip155:43114": {ChainID: 43114, Name: "Avalanche C-Chain", USDCAddress: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"},
 
 	// EVM testnet
-	"eip155:84532": {ChainID: 84532, Name: "Base Sepolia", USDCAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"},
+	"eip155:84532": {ChainID: 84532, Name: "Base Sepolia", USDCAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", RPCURL: "https://sepolia.base.org"},
 	"eip155:80001": {ChainID: 80001, Name: "Polygon Mumbai", USDCAddress: "0x9999f7Fea5938fD3b1E26A12c3f2fb024e194f97"},
 
 	// Solana (not EVM — handled by separate SVM signer, included for allowlist validation)
@@ -127,6 +131,11 @@ type NetworkInfo struct {
 	ChainID     int64  // EVM chain ID (0 for non-EVM)
 	Name        string // Human-readable name for logs and alerts
 	USDCAddress string // Canonical USDC contract address on this chain
+	// RPCURL is a public JSON-RPC endpoint for this network, used only by
+	// the "upto" scheme's Permit2 allowance preflight (ensurePermit2Allowance
+	// in permit2.go). Empty means that preflight fails closed with a clear
+	// error on this network — harmless for "exact", which never reads it.
+	RPCURL string
 }
 
 // v1NetworkToCAIP2 maps x402 V1 network slugs (e.g. "base-sepolia") to their
@@ -210,11 +219,13 @@ type ResourceInfo struct {
 }
 
 // PaymentPayload is the signed payload attached to the PAYMENT-SIGNATURE header.
+// Payload is raw JSON because its shape depends on the chosen scheme:
+// EIP3009Payload for "exact", Permit2Payload for "upto" (see permit2.go).
 type PaymentPayload struct {
 	X402Version int                `json:"x402Version"`
 	Accepted    PaymentRequirement `json:"accepted"`
 	Resource    *ResourceInfo      `json:"resource,omitempty"`
-	Payload     EIP3009Payload     `json:"payload"`
+	Payload     json.RawMessage    `json:"payload"`
 	Extensions  map[string]any     `json:"extensions,omitempty"`
 }
 
@@ -247,10 +258,10 @@ type FacilitatorVerifyRequest struct {
 
 // v1PaymentPayload is the base64-decoded body of the X-PAYMENT header.
 type v1PaymentPayload struct {
-	X402Version int            `json:"x402Version"`
-	Scheme      string         `json:"scheme"`
-	Network     string         `json:"network"` // V1 slug, e.g. "base-sepolia"
-	Payload     EIP3009Payload `json:"payload"`
+	X402Version int             `json:"x402Version"`
+	Scheme      string          `json:"scheme"`
+	Network     string          `json:"network"` // V1 slug, e.g. "base-sepolia"
+	Payload     json.RawMessage `json:"payload"`
 }
 
 // v1PaymentRequirements is the requirement shape a V1 facilitator's /verify
@@ -289,6 +300,10 @@ type PaymentResponse struct {
 	Network     string `json:"network,omitempty"`
 	Payer       string `json:"payer,omitempty"`
 	ErrorReason string `json:"errorReason,omitempty"`
+	// Amount is the "upto" scheme's SettlementResponse extension: the actual
+	// atomic-unit amount charged (may be "0"). Unused for "exact", where the
+	// charged amount is already known from the requirement itself.
+	Amount string `json:"amount,omitempty"`
 }
 
 // ─── Policy types ──────────────────────────────────────────────────────────────
@@ -325,10 +340,26 @@ type X402Policy struct {
 	// Human approval gate
 	RequireApprovalAboveCents int64
 	ApprovalFunc              func(ctx context.Context, req ApprovalRequest) (bool, error)
+	// ApprovalTimeout bounds how long ApprovalFunc may block before this
+	// rail treats the payment as denied (see Factory, which wires
+	// ApprovalFunc to approval.Registry.Await using this value). Zero means
+	// "use approval.DefaultTimeout" — Await's own fallback, not duplicated
+	// here.
+	ApprovalTimeout time.Duration
 
 	// SkipPreVerify disables the pre-verification call to the facilitator.
 	// When false (default), Sentinel calls /verify before retrying the request.
 	SkipPreVerify bool
+
+	// AllowUpto opts an agent into the x402 "upto" scheme (authorize a max,
+	// resource server settles actual usage after the call). Default false:
+	// "exact" is always preferred when a challenge offers both, and "upto" is
+	// never selected at all unless this is set — see selectRequirement. Off
+	// by default because "upto" shifts trust from "I know the exact price
+	// before I pay" to "I trust the server to bill me fairly afterward" (the
+	// scheme's own spec names this risk explicitly), which should be a
+	// conscious per-agent choice, not a silent default.
+	AllowUpto bool
 
 	// Velocity limits (0 = use rail defaults: 30/min, 200/hr, 60s cooldown)
 	VelocityMaxPerMinute    int
@@ -435,6 +466,19 @@ type X402Rail struct {
 	logger     *zap.Logger
 	httpClient *http.Client
 	auditLog   rail.AuditLogger
+
+	// supportedCache/supportedFetchedAt cache the facilitator's /supported
+	// response (used by the "upto" scheme's allowance preflight). Zero
+	// values are safe — populated lazily on first use.
+	supportedMu        sync.Mutex
+	supportedCache     *supportedResponse
+	supportedFetchedAt time.Time
+
+	// allowanceOK caches "upto" Permit2-allowance preflight successes per
+	// owner+token+network, so it's only checked on-chain once. Nil map is
+	// safe — initialized lazily on first use.
+	allowanceMu sync.Mutex
+	allowanceOK map[string]bool
 }
 
 var _ rail.Rail = (*X402Rail)(nil)
@@ -504,6 +548,7 @@ func (r *X402Rail) ProxyRequest(
 		Endpoint:    req.URL.String(),
 		Method:      req.Method,
 		TaskContext: taskContext,
+		CallerDID:   rail.CallerDIDFromContext(ctx),
 		Status:      "blocked",
 	}
 	defer func() {
@@ -652,7 +697,34 @@ func (r *X402Rail) ProxyRequest(
 		}
 	}
 
-	// ── Step 10: Sign EIP-3009 authorization ─────────────────────────────────
+	// ── Step 10: Sign payment authorization ──────────────────────────────────
+	// "upto" needs a one-time Permit2 approval in place before it can sign —
+	// checked/preflighted here, ahead of signing, so a missing approval blocks
+	// cleanly instead of producing a signature the facilitator will reject.
+	if chosen.Scheme == x402SchemeUpto {
+		network, ok := KnownNetworks[chosen.Network]
+		if !ok {
+			record.BlockReason = "unknown_network_for_upto_preflight"
+			http.Error(w, "aor: unknown network", http.StatusInternalServerError)
+			return
+		}
+		maxAmount, ok := new(big.Int).SetString(chosen.Amount, 10)
+		if !ok {
+			record.BlockReason = "amount_parse_error"
+			http.Error(w, "aor: cannot parse payment amount", http.StatusInternalServerError)
+			return
+		}
+		walletAddr := common.HexToAddress(r.policy.WalletAddress)
+		tokenAddr := common.HexToAddress(chosen.Asset)
+		if err := r.ensurePermit2Allowance(ctx, walletAddr, tokenAddr, network, maxAmount); err != nil {
+			record.BlockReason = "permit2_allowance_preflight_failed: " + err.Error()
+			r.logger.Info("upto payment blocked: Permit2 allowance preflight failed",
+				zap.String("agent", agentID), zap.Error(err))
+			http.Error(w, fmt.Sprintf("aor: upto scheme: %s", err.Error()), http.StatusForbidden)
+			return
+		}
+	}
+
 	payload, err := r.signPayment(ctx, chosen, challenge.Resource, req.URL.String())
 	if err != nil {
 		record.BlockReason = "signing_error: " + err.Error()
@@ -704,8 +776,10 @@ func (r *X402Rail) ProxyRequest(
 	if settlementHeader == "" {
 		settlementHeader = retryResp.Header.Get(headerV1PaymentResponse)
 	}
+	var settlement *PaymentResponse
 	if settlementHeader != "" {
 		if pr, err := decodePaymentResponse(settlementHeader); err == nil {
+			settlement = pr
 			record.TxHash = pr.Transaction
 			r.logger.Info("x402 payment settled",
 				zap.String("tx_hash", pr.Transaction),
@@ -734,6 +808,30 @@ func (r *X402Rail) ProxyRequest(
 	record.AmountRaw = amountRaw
 	record.Asset = chosen.Asset
 	record.Network = chosen.Network
+
+	// "upto" reserved the authorized MAX in Step 8; now that the retried
+	// response is in, adjust down to what was actually settled so budget and
+	// audit totals reflect real spend, not worst-case exposure. If no
+	// settlement amount is parseable, conservatively keep the max reserved —
+	// understating consumed budget is worse than overstating it for a spend
+	// guardrail.
+	if chosen.Scheme == x402SchemeUpto {
+		if settlement != nil && settlement.Amount != "" {
+			if actualCents, actualRaw, err := r.parsePriceToCents(settlement.Amount, chosen.Asset, chosen.Network); err == nil {
+				if diff := amountCents - actualCents; diff > 0 {
+					r.budget.Refund(diff)
+				}
+				record.AmountUSD = float64(actualCents) / 100
+				record.AmountRaw = actualRaw
+			} else {
+				r.logger.Warn("x402 upto: could not parse settled amount, keeping authorized max reserved",
+					zap.String("settled_amount", settlement.Amount), zap.Error(err))
+			}
+		} else {
+			r.logger.Warn("x402 upto: upstream reported no settlement amount, keeping authorized max reserved")
+		}
+	}
+
 	if retryResp.StatusCode >= 200 && retryResp.StatusCode < 300 {
 		record.Status = "allowed"
 	} else {
@@ -785,10 +883,10 @@ func (r *X402Rail) selectRequirement(challenge *PaymentRequired) (*PaymentRequir
 		}
 	}
 
-	// isAcceptable returns true only for requirements this rail can sign:
-	// scheme must be "exact" and the network must be known and allowed.
-	isAcceptable := func(req *PaymentRequirement) bool {
-		if req.Scheme != x402SchemeExact {
+	// isAcceptable returns true only for requirements this rail can sign for
+	// the given scheme: the network must be known and allowed.
+	isAcceptable := func(req *PaymentRequirement, scheme string) bool {
+		if req.Scheme != scheme {
 			return false
 		}
 		if !allowedNets[req.Network] {
@@ -798,26 +896,36 @@ func (r *X402Rail) selectRequirement(challenge *PaymentRequired) (*PaymentRequir
 		return known
 	}
 
-	// Prefer the configured preferred chain.
-	for i := range challenge.Accepts {
-		req := &challenge.Accepts[i]
-		if req.Network == r.policy.PreferredChain && isAcceptable(req) {
-			return req, nil
+	// schemePriority always tries "exact" first — mature, and no after-the-
+	// fact trust exposure — and only considers "upto" when the operator has
+	// explicitly opted in via AllowUpto (see X402Policy.AllowUpto).
+	schemePriority := []string{x402SchemeExact}
+	if r.policy.AllowUpto {
+		schemePriority = append(schemePriority, x402SchemeUpto)
+	}
+
+	for _, scheme := range schemePriority {
+		// Prefer the configured preferred chain.
+		for i := range challenge.Accepts {
+			req := &challenge.Accepts[i]
+			if req.Network == r.policy.PreferredChain && isAcceptable(req, scheme) {
+				return req, nil
+			}
+		}
+		// Fall back to any acceptable option for this scheme.
+		for i := range challenge.Accepts {
+			req := &challenge.Accepts[i]
+			if isAcceptable(req, scheme) {
+				return req, nil
+			}
 		}
 	}
 
-	// Fall back to any acceptable option.
-	for i := range challenge.Accepts {
-		req := &challenge.Accepts[i]
-		if isAcceptable(req) {
-			return req, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no_acceptable_payment_option: server requires %v (schemes %v), aor supports scheme=%q networks=%v",
+	return nil, fmt.Errorf("no_acceptable_payment_option: server requires %v (schemes %v), aor supports schemes=%v (allow_upto=%v) networks=%v",
 		networksFromRequirements(challenge.Accepts),
 		schemesFromRequirements(challenge.Accepts),
-		x402SchemeExact,
+		schemePriority,
+		r.policy.AllowUpto,
 		r.policy.AllowedNetworks,
 	)
 }
@@ -876,7 +984,21 @@ func (r *X402Rail) parsePriceToCents(atomicAmount, asset, network string) (int64
 
 // ─── EIP-3009 Signing ─────────────────────────────────────────────────────────
 
+// signPayment dispatches to the signer for req's scheme: signExact (EIP-3009,
+// "exact") or signPermit2 (Permit2 witness-transfer, "upto" — see permit2.go).
 func (r *X402Rail) signPayment(
+	ctx context.Context,
+	req *PaymentRequirement,
+	resource *ResourceInfo,
+	rawURL string,
+) (*PaymentPayload, error) {
+	if req.Scheme == x402SchemeUpto {
+		return r.signPermit2(ctx, req, resource, rawURL)
+	}
+	return r.signExact(ctx, req, resource, rawURL)
+}
+
+func (r *X402Rail) signExact(
 	ctx context.Context,
 	req *PaymentRequirement,
 	resource *ResourceInfo,
@@ -968,14 +1090,19 @@ func (r *X402Rail) signPayment(
 		res = &ResourceInfo{URL: rawURL}
 	}
 
+	rawPayload, err := marshalExactPayload(EIP3009Payload{
+		Signature:     sigHex,
+		Authorization: auth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal exact payload: %w", err)
+	}
+
 	return &PaymentPayload{
 		X402Version: x402Version,
 		Accepted:    *req,
 		Resource:    res,
-		Payload: EIP3009Payload{
-			Signature:     sigHex,
-			Authorization: auth,
-		},
+		Payload:     rawPayload,
 	}, nil
 }
 

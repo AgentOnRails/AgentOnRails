@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     status       TEXT    NOT NULL,  -- allowed | blocked | failed
     block_reason TEXT    NOT NULL DEFAULT '',
     task_context TEXT    NOT NULL DEFAULT '',
+    caller_did   TEXT    NOT NULL DEFAULT '',  -- verified signer DID, if an identity gate checked one
     latency_ms   INTEGER NOT NULL DEFAULT 0
 );
 

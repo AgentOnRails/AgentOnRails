@@ -18,8 +18,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/agentOnRails/agent-on-rails/alert"
+	"github.com/agentOnRails/agent-on-rails/approval"
 	"github.com/agentOnRails/agent-on-rails/config"
-	"github.com/agentOnRails/agent-on-rails/internal/alert"
 	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
 	"github.com/agentOnRails/agent-on-rails/rail"
@@ -28,15 +29,23 @@ import (
 
 // Daemon manages per-agent HTTP proxy servers.
 type Daemon struct {
-	cfg     *config.GlobalConfig
-	agents  []*agentRuntime
-	db      *audit.SQLiteAuditLogger
-	alerter *alert.Alerter
-	vault   *vault.Vault
-	ca      *x402.CA // non-nil when HTTPS interception is enabled
-	logger  *zap.Logger
-	servers []*http.Server
-	mu      sync.Mutex
+	cfg        *config.GlobalConfig
+	agents     []*agentRuntime
+	db         *audit.SQLiteAuditLogger
+	alerter    *alert.Alerter
+	vault      *vault.Vault
+	ca         *x402.CA // non-nil when HTTPS interception is enabled
+	logger     *zap.Logger
+	passphrase string // stored (not just used inline) so a policy reload can rebuild a rail later
+	approvals  *approval.Registry
+
+	// servers is keyed by agent ID rather than a bare slice so the control
+	// API can pause/resume one agent's proxy server without touching any
+	// other's — see pauseAgent/resumeAgent in control.go.
+	servers       map[string]*http.Server
+	controlServer *http.Server
+	controlToken  string
+	mu            sync.Mutex
 }
 
 // agentRuntime holds the live state for a single agent.
@@ -87,53 +96,25 @@ func New(
 	alerter := alert.New(cfg.Alerts.SlackWebhookURL, cfg.Alerts.BudgetThresholdPct, logger)
 
 	d := &Daemon{
-		cfg:     cfg,
-		db:      db,
-		alerter: alerter,
-		vault:   v,
-		ca:      ca,
-		logger:  logger,
+		cfg:        cfg,
+		db:         db,
+		alerter:    alerter,
+		vault:      v,
+		ca:         ca,
+		logger:     logger,
+		passphrase: passphrase,
+		approvals:  approval.NewRegistry(),
+		servers:    make(map[string]*http.Server),
 	}
 
 	for _, agentCfg := range agents {
-		var active rail.Rail
-		var activeRailName string
-
-		for railName, rawCfg := range agentCfg.Rails {
-			factory, ok := rail.Get(railName)
-			if !ok {
-				return nil, fmt.Errorf("daemon: agent %s: unknown rail %q (not registered in this binary — if this is a commercial/paid rail, run the binary that registers it instead, e.g. aor-pro, and make sure its package is blank-imported before daemon.New is called)", agentCfg.AgentID, railName)
-			}
-
-			r, enabled, err := factory(rail.FactoryParams{
-				AgentID:    agentCfg.AgentID,
-				RawConfig:  rawCfg,
-				Global:     cfg,
-				Vault:      v,
-				Passphrase: passphrase,
-				Audit:      db,
-				Logger:     logger,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("daemon: build rail %q for %s: %w", railName, agentCfg.AgentID, err)
-			}
-			if !enabled {
-				continue
-			}
-			if active != nil {
-				return nil, fmt.Errorf("daemon: agent %s: multiple active rails not yet supported (%s and %s)",
-					agentCfg.AgentID, activeRailName, railName)
-			}
-			active = r
-			activeRailName = railName
+		active, _, err := d.buildAgentRail(agentCfg)
+		if err != nil {
+			return nil, err
 		}
-
 		if active == nil {
 			continue
 		}
-
-		// Wire budget threshold alert callback.
-		active.Budget().OnThreshold = alerter.BudgetThresholdCallback(agentCfg.AgentID)
 
 		// Rehydrate budget from persistent audit state.
 		if err := d.rehydrateBudget(agentCfg.AgentID, active); err != nil {
@@ -169,12 +150,30 @@ func (d *Daemon) Start(ctx context.Context) error {
 			return fmt.Errorf("daemon: start server for %s: %w", ar.cfg.AgentID, err)
 		}
 		d.mu.Lock()
-		d.servers = append(d.servers, srv)
+		d.servers[ar.cfg.AgentID] = srv
 		d.mu.Unlock()
 		d.logger.Info("agent proxy started",
 			zap.String("agent", ar.cfg.AgentID),
 			zap.Int("port", ar.cfg.ProxyPort),
 		)
+	}
+
+	// A control API bind failure (e.g. its port already in use) degrades to
+	// a logged warning rather than aborting the whole daemon — approvals/
+	// pause/resume/policy-reload become unavailable for this run, but the
+	// actual payment proxy every agent depends on is unaffected. This is
+	// an auxiliary control surface, not the core product; it shouldn't be
+	// able to take the real thing down.
+	if !d.cfg.Daemon.ControlDisabled {
+		ctrl, err := d.startControlServer()
+		if err != nil {
+			d.logger.Warn("control API failed to start — approvals/pause/resume/policy-reload are unavailable this run",
+				zap.Error(err))
+		} else {
+			d.mu.Lock()
+			d.controlServer = ctrl
+			d.mu.Unlock()
+		}
 	}
 
 	// Periodically persist in-memory budget state so restarts don't reset counters.
@@ -203,6 +202,51 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	return d.shutdown()
+}
+
+// buildAgentRail builds the one active rail for agentCfg from its
+// rails.<name> blocks, exactly the logic New's constructor loop used to
+// run inline — extracted so the control API's policy-reload endpoint
+// (control.go) can rebuild a single agent's rail the same way at runtime,
+// without duplicating (and risking divergence from) startup's own rules:
+// unknown rail names error, more than one enabled rail per agent errors,
+// and the budget-threshold alert callback is always wired the same way.
+// Returns active=nil (no error) if agentCfg has no enabled rail at all.
+func (d *Daemon) buildAgentRail(agentCfg *config.AgentConfig) (active rail.Rail, activeRailName string, err error) {
+	for railName, rawCfg := range agentCfg.Rails {
+		factory, ok := rail.Get(railName)
+		if !ok {
+			return nil, "", fmt.Errorf("daemon: agent %s: unknown rail %q (not registered in this binary — if this is a commercial/paid rail, run the binary that registers it instead, e.g. aor-pro, and make sure its package is blank-imported before daemon.New is called)", agentCfg.AgentID, railName)
+		}
+
+		r, enabled, err := factory(rail.FactoryParams{
+			AgentID:    agentCfg.AgentID,
+			RawConfig:  rawCfg,
+			Global:     d.cfg,
+			Vault:      d.vault,
+			Passphrase: d.passphrase,
+			Audit:      d.db,
+			Logger:     d.logger,
+			Approvals:  d.approvals,
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("daemon: build rail %q for %s: %w", railName, agentCfg.AgentID, err)
+		}
+		if !enabled {
+			continue
+		}
+		if active != nil {
+			return nil, "", fmt.Errorf("daemon: agent %s: multiple active rails not yet supported (%s and %s)",
+				agentCfg.AgentID, activeRailName, railName)
+		}
+		active = r
+		activeRailName = railName
+	}
+
+	if active != nil {
+		active.Budget().OnThreshold = d.alerter.BudgetThresholdCallback(agentCfg.AgentID)
+	}
+	return active, activeRailName, nil
 }
 
 func (d *Daemon) startAgentServer(ar *agentRuntime) (*http.Server, error) {
@@ -242,7 +286,13 @@ func (d *Daemon) shutdown() error {
 	defer cancel()
 
 	d.mu.Lock()
-	servers := d.servers
+	servers := make([]*http.Server, 0, len(d.servers)+1)
+	for _, srv := range d.servers {
+		servers = append(servers, srv)
+	}
+	if d.controlServer != nil {
+		servers = append(servers, d.controlServer)
+	}
 	d.mu.Unlock()
 
 	var wg sync.WaitGroup

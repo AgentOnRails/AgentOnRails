@@ -98,3 +98,46 @@ enabled: true
 		t.Error("expected error for missing wallet_address when enabled")
 	}
 }
+
+func TestParseRailConfig_AllowUptoDefaultsFalse(t *testing.T) {
+	node := mustNode(t, `
+enabled: true
+wallet_address: "0x1234567890abcdef1234567890abcdef12345678"
+`)
+	rc, err := ParseRailConfig(node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rc.AllowUpto {
+		t.Error("AllowUpto should default to false")
+	}
+	policy, err := BuildPolicy("", rc)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	if policy.AllowUpto {
+		t.Error("X402Policy.AllowUpto should default to false")
+	}
+}
+
+func TestParseRailConfig_AllowUptoExplicitTrue(t *testing.T) {
+	node := mustNode(t, `
+enabled: true
+wallet_address: "0x1234567890abcdef1234567890abcdef12345678"
+allow_upto: true
+`)
+	rc, err := ParseRailConfig(node)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !rc.AllowUpto {
+		t.Error("AllowUpto should be true when set in YAML")
+	}
+	policy, err := BuildPolicy("", rc)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	if !policy.AllowUpto {
+		t.Error("X402Policy.AllowUpto should carry through BuildPolicy")
+	}
+}

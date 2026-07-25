@@ -17,6 +17,7 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
 - **x402 payment rail** — automatically handles HTTP 402 Payment Required challenges: signs EIP-3009 authorizations, pre-verifies with the facilitator, and retries the request. Speaks both x402 protocol variants — the V1 `X-PAYMENT` header format and the newer `PAYMENT-SIGNATURE` header format — replying in whichever the server used
 - **Non-x402 402 passthrough** — plain HTTP 402 responses from Stripe, Cloudflare, Vercel, and other non-x402 APIs are forwarded transparently to the agent instead of being replaced with a 502
 - **Spend guardrails** — per-agent daily/weekly/monthly budgets, per-call maximums, velocity limits, endpoint allowlists/blocklists
+- **Human approval gate** — hold any payment above a configurable amount (`require_approval_above_usd`) for a yes/no from a local control API instead of paying it automatically
 - **Encrypted wallet vault** — private keys never touch disk unencrypted; AES-256-GCM + scrypt
 - **Audit log** — every transaction written to SQLite; queryable with `aor audit` and `aor spend`
 
@@ -118,9 +119,17 @@ export HTTPS_PROXY=http://localhost:8402
 
 That's it. Any HTTP client that respects standard proxy env vars works — Python `httpx`/`requests`, Node `fetch`, `curl`, LangChain, CrewAI, etc. No SDK changes required.
 
+Or skip the manual exports and let `aor run` set them for just one process:
+
+```bash
+aor run --agent my-agent -- python my_agent.py
+```
+
 > **Note on HTTPS targets:** By default, x402 payment interception works for **plain HTTP** upstream URLs. For HTTPS targets the proxy establishes an opaque CONNECT tunnel — traffic passes through but 402 challenges inside the TLS session are not visible and payments are not handled.
 >
-> To handle payments on **HTTPS** endpoints too, enable TLS interception in `aor.yaml`:
+> If your agent is a brand-new build rather than an existing HTTP client, consider [MCP mode](#mcp-server-mode) instead — it gets full HTTPS support with no CA or interception involved at all.
+>
+> To handle payments on **HTTPS** endpoints with the proxy, enable TLS interception in `aor.yaml`:
 >
 > ```yaml
 > daemon:
@@ -128,7 +137,14 @@ That's it. Any HTTP client that respects standard proxy env vars works — Pytho
 >   ca_dir: "~/.aor/ca"
 > ```
 >
-> On startup the daemon generates a local CA and logs its path (`~/.aor/ca/aor-ca.crt`). Install that certificate in your agent's trust store (or point the agent at it, e.g. `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`). AgentOnRails then terminates the client's TLS locally, inspects the decrypted request for x402 challenges, and makes the real HTTPS call upstream itself. The CA private key never leaves the machine. If you prefer not to run interception, use HTTP endpoints, a TLS-terminating reverse proxy in front of your API, or MCP mode.
+> On startup the daemon generates a local CA and logs its path (`~/.aor/ca/aor-ca.crt`). AgentOnRails then terminates the client's TLS locally, inspects the decrypted request for x402 challenges, and makes the real HTTPS call upstream itself. The CA private key never leaves the machine.
+>
+> Your agent has to trust that CA. Two ways to do it, in order of preference:
+>
+> 1. **`aor run --agent <id> -- <command>`** — sets `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`/`CURL_CA_BUNDLE` (plus the proxy vars) for that one subprocess only. Most HTTP clients (Python, Node, curl) already respect these — nothing is installed system-wide, and trust disappears when the process exits.
+> 2. **`aor trust install`** — for runtimes that ignore those env vars (some Go binaries, the JVM, some system tools), installs the CA into your OS's actual trust store. This changes trust settings other processes on the machine will also see; run `aor trust uninstall` when you're done with it.
+>
+> If you'd rather not run interception at all, use HTTP endpoints, a TLS-terminating reverse proxy in front of your API, or MCP mode.
 
 ```python
 import os, httpx
@@ -156,6 +172,8 @@ aor logs tail
 ## MCP server mode
 
 In addition to the transparent proxy, AgentOnRails can run as an **MCP (Model Context Protocol) server**. Instead of intercepting HTTP traffic, the agent makes payments via explicit tool calls — useful for Claude Desktop, Claude Code, Cursor, and any other MCP-compatible client.
+
+If you're building a new agent rather than retrofitting an existing HTTP client, start here: MCP mode gets full HTTPS support with no CA, no interception, and no trust-store changes at all.
 
 ```
 Claude Desktop / Claude Code / Cursor
@@ -365,6 +383,16 @@ aor start [--config ~/.aor/aor.yaml] [--passphrase ...]
 aor stop
     Gracefully stop the running daemon (sends SIGTERM).
 
+aor run --agent <agent-id> -- <command> [args...]
+    Run a command with that agent's proxy (and CA, if https_intercept is on)
+    wired in via env vars, scoped to that one subprocess. Requires the
+    daemon to already be running. See "Note on HTTPS targets" above.
+
+aor trust install
+aor trust uninstall
+    Install/remove the local interception CA in the OS trust store — the
+    fallback for runtimes that don't respect the env vars "aor run" sets.
+
 aor logs tail [agent-id]
     Stream the audit log in real time (polls every 500ms, Ctrl+C to stop).
 
@@ -388,6 +416,53 @@ aor version
 
 ---
 
+## Control API: approve payments, pause agents, reload policy
+
+Starting the daemon also starts a small localhost-only, bearer-token-authenticated
+HTTP API for controlling it while it runs — no more PID-file signals as the only
+lever. On first start it writes a random token to `daemon.control_token_file`
+(default `~/.aor/control-token`); every request below needs it, either as
+`Authorization: Bearer <token>` or `?token=<token>`.
+
+```
+GET  /control/approvals
+    List payments currently held for human approval (see require_approval_above_usd
+    below) — agent, amount, endpoint, task context, how long it's been waiting.
+
+POST /control/approvals/{id}/approve
+POST /control/approvals/{id}/deny
+    Resolve one held payment. The agent's original request — which has been
+    blocked this whole time — proceeds or fails immediately once you do.
+
+POST /control/agents/{id}/pause
+POST /control/agents/{id}/resume
+    Stop or start one agent's proxy server without touching any other agent
+    or restarting the daemon process.
+
+POST /control/agents/{id}/policy
+    Reload one agent's rails.* config from a new YAML body (the same shape as
+    that agent's own config file's "rails:" key) without restarting the daemon —
+    useful for bumping a spend limit without downtime for every other agent.
+```
+
+Example: hold anything over $50 for approval, then approve it from another shell.
+
+```yaml
+rails:
+  x402:
+    require_approval_above_usd: "50.00"
+```
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.aor/control-token)" http://127.0.0.1:8420/control/approvals
+curl -X POST -H "Authorization: Bearer $(cat ~/.aor/control-token)" \
+  http://127.0.0.1:8420/control/approvals/<id>/approve
+```
+
+Set `daemon.control_disabled: true` to turn this off entirely.
+
+---
+
 ## Configuration reference
 
 ### `~/.aor/aor.yaml` (global)
@@ -398,6 +473,9 @@ aor version
 | `daemon.log_level` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `daemon.audit_db` | `~/.aor/audit.db` | SQLite audit log path |
 | `daemon.vault_dir` | `~/.aor/vaults` | Encrypted key storage directory |
+| `daemon.control_addr` | `127.0.0.1:8420` | Control API listen address (see above) |
+| `daemon.control_token_file` | `~/.aor/control-token` | Where the control API's bearer token is stored |
+| `daemon.control_disabled` | `false` | Set `true` to not start the control API at all |
 | `alerts.slack_webhook_url` | — | Slack incoming webhook (optional) |
 | `alerts.budget_threshold_pct` | `80` | Alert when spend reaches this % of limit |
 | `facilitators.x402` | Coinbase CDP | x402 facilitator URL |
@@ -421,6 +499,8 @@ aor version
 | `rails.x402.velocity.max_per_minute` | Max payment attempts per minute |
 | `rails.x402.velocity.max_per_hour` | Max payment attempts per hour |
 | `rails.x402.skip_pre_verify` | Skip facilitator `/verify` call (faster, less safe) |
+| `rails.x402.require_approval_above_usd` | Hold payments above this amount for the control API instead of paying automatically |
+| `rails.x402.approval_timeout_sec` | How long a held payment waits before failing as denied (default: 300) |
 
 ---
 
@@ -469,8 +549,14 @@ audit, and use this repository commercially at no cost.
 
 Additional payment rails (card, ACH, Lightning/L402), a privacy rail,
 per-agent cryptographic identity, and the GUI cockpit backend are part of a
-separate commercial offering, distributed outside this repository. See
-`docs/ROADMAP.md` for the full plan.
+separate commercial offering, distributed outside this repository. See the
+[Roadmap](#roadmap) section below for what's free vs. planned.
+
+Agents managed by the commercial identity module can optionally attach a
+cryptographic attestation of which agent made a given call — see
+[`docs/attestation-spec.md`](docs/attestation-spec.md) for the complete,
+standalone wire format. Verifying it needs no AgentOnRails software: it's
+`did:key` + ed25519, both open standards.
 
 ---
 
@@ -479,6 +565,7 @@ separate commercial offering, distributed outside this repository. See
 - [x] x402 crypto rail (Base, Ethereum, Optimism, Arbitrum, Polygon)
 - [x] MCP server mode (`aor mcp`) — Claude Desktop, Claude Code, Cursor
 - [x] HTTP 402 passthrough (Stripe, Cloudflare, Vercel ecosystem)
+- [x] Control API — approve/deny held payments, pause/resume agents, live policy reload
 - [ ] Virtual card rail (Stripe Issuing / Lithic)
 - [ ] Bank ACH rail (Stripe Treasury / Plaid Transfer)
 - [ ] GUI dashboard

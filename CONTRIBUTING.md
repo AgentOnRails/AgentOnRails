@@ -31,9 +31,9 @@ rail/                 — Rail plugin interface + registry (public plugin bounda
 config/               — YAML config loading and validation (public)
 vault/                — AES-256-GCM encrypted wallet key storage (public)
 daemon/               — HTTP proxy daemon (per-agent server lifecycle, public)
+alert/                — Slack webhook notifications (public)
 internal/rail/x402/   — x402 payment rail (EIP-3009 signing, proxy logic)
 internal/audit/       — SQLite audit log
-internal/alert/       — Slack webhook notifications
 cmd/aor/              — CLI (Cobra)
 test/integration/     — Integration tests (guarded by TEST_INTEGRATION=1)
 configs/              — Example configuration files

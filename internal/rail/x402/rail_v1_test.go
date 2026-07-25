@@ -140,13 +140,17 @@ func TestProxyRequest_V1Challenge_RepliesWithXPayment(t *testing.T) {
 	if v1.Network != "base-sepolia" {
 		t.Errorf("network = %q, want base-sepolia (slug, not CAIP-2)", v1.Network)
 	}
-	if !strings.EqualFold(v1.Payload.Authorization.From, addr.Hex()) {
-		t.Errorf("authorization.from = %q, want %q", v1.Payload.Authorization.From, addr.Hex())
+	var eip3009 EIP3009Payload
+	if err := json.Unmarshal(v1.Payload, &eip3009); err != nil {
+		t.Fatalf("unmarshal exact payload: %v", err)
 	}
-	if !strings.EqualFold(v1.Payload.Authorization.To, payTo) {
-		t.Errorf("authorization.to = %q, want %q", v1.Payload.Authorization.To, payTo)
+	if !strings.EqualFold(eip3009.Authorization.From, addr.Hex()) {
+		t.Errorf("authorization.from = %q, want %q", eip3009.Authorization.From, addr.Hex())
 	}
-	if v1.Payload.Signature == "" {
+	if !strings.EqualFold(eip3009.Authorization.To, payTo) {
+		t.Errorf("authorization.to = %q, want %q", eip3009.Authorization.To, payTo)
+	}
+	if eip3009.Signature == "" {
 		t.Error("authorization signature is empty")
 	}
 

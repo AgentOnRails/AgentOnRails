@@ -28,6 +28,16 @@ type DaemonConfig struct {
 	// opaquely with no payment handling.
 	HTTPSIntercept bool   `yaml:"https_intercept"`
 	CADir          string `yaml:"ca_dir"` // directory for the interception CA (default: ~/.aor/ca)
+
+	// ControlDisabled turns off the daemon's control API entirely — no
+	// listener is started, so approval requests are never wired to
+	// anything (RequireApprovalAboveCents falls back to failing closed,
+	// the pre-Phase-7 behavior) and pause/resume/policy-reload aren't
+	// available. Default false: the control API is on, since it's what
+	// makes the free x402 rail's own approval gate actually work.
+	ControlDisabled  bool   `yaml:"control_disabled"`
+	ControlAddr      string `yaml:"control_addr"`       // default: 127.0.0.1:8420
+	ControlTokenFile string `yaml:"control_token_file"` // default: ~/.aor/control-token
 }
 
 // AlertsConfig controls Slack notifications.
@@ -65,6 +75,7 @@ const (
 	DefaultMaxPerMinute       = 30
 	DefaultMaxPerHour         = 200
 	DefaultCooldownSeconds    = 60
+	DefaultControlAddr        = "127.0.0.1:8420"
 	DefaultUpstreamTimeout    = 10 * time.Second
 	DefaultFacilitatorTimeout = 5 * time.Second
 	DefaultPayloadTTL         = 60 * time.Second

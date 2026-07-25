@@ -2,6 +2,7 @@ package x402
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"math/big"
 	"net/http"
@@ -183,6 +184,51 @@ func TestSelectRequirement_AllowedNetworksFilter(t *testing.T) {
 	}
 }
 
+func TestSelectRequirement_UptoRejectedByDefault(t *testing.T) {
+	rail := &X402Rail{policy: &X402Policy{}} // AllowUpto defaults false
+	challenge := &PaymentRequired{
+		Accepts: []PaymentRequirement{
+			{Scheme: "upto", Network: "eip155:84532"},
+		},
+	}
+	if _, err := rail.selectRequirement(challenge); err == nil {
+		t.Error("expected upto to be rejected when AllowUpto is false, even as the only option")
+	}
+}
+
+func TestSelectRequirement_ExactPreferredOverUpto(t *testing.T) {
+	rail := &X402Rail{policy: &X402Policy{AllowUpto: true}}
+	challenge := &PaymentRequired{
+		Accepts: []PaymentRequirement{
+			{Scheme: "upto", Network: "eip155:84532"},
+			{Scheme: "exact", Network: "eip155:84532"},
+		},
+	}
+	req, err := rail.selectRequirement(challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Scheme != "exact" {
+		t.Errorf("scheme = %q, want exact preferred over upto", req.Scheme)
+	}
+}
+
+func TestSelectRequirement_UptoAllowedWhenOnlyOption(t *testing.T) {
+	rail := &X402Rail{policy: &X402Policy{AllowUpto: true}}
+	challenge := &PaymentRequired{
+		Accepts: []PaymentRequirement{
+			{Scheme: "upto", Network: "eip155:84532"},
+		},
+	}
+	req, err := rail.selectRequirement(challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Scheme != "upto" {
+		t.Errorf("scheme = %q, want upto", req.Scheme)
+	}
+}
+
 // ─── parsePriceToCents tests ───────────────────────────────────────────────────
 
 func TestParsePriceToCents(t *testing.T) {
@@ -258,14 +304,18 @@ func TestSignPayment_ProducesValidSignature(t *testing.T) {
 	if payload.X402Version != 2 {
 		t.Errorf("x402Version = %d, want 2", payload.X402Version)
 	}
-	if payload.Payload.Signature == "" {
+	var eip3009 EIP3009Payload
+	if err := json.Unmarshal(payload.Payload, &eip3009); err != nil {
+		t.Fatalf("unmarshal exact payload: %v", err)
+	}
+	if eip3009.Signature == "" {
 		t.Error("signature is empty")
 	}
-	if len(payload.Payload.Authorization.Nonce) != 66 { // "0x" + 64 hex chars
-		t.Errorf("nonce length = %d, want 66", len(payload.Payload.Authorization.Nonce))
+	if len(eip3009.Authorization.Nonce) != 66 { // "0x" + 64 hex chars
+		t.Errorf("nonce length = %d, want 66", len(eip3009.Authorization.Nonce))
 	}
-	if payload.Payload.Authorization.From != addr.Hex() {
-		t.Errorf("from = %s, want %s", payload.Payload.Authorization.From, addr.Hex())
+	if eip3009.Authorization.From != addr.Hex() {
+		t.Errorf("from = %s, want %s", eip3009.Authorization.From, addr.Hex())
 	}
 }
 

@@ -105,6 +105,12 @@ func applyGlobalDefaults(cfg *GlobalConfig) {
 	if cfg.Daemon.CADir == "" {
 		cfg.Daemon.CADir = "~/.aor/ca"
 	}
+	if cfg.Daemon.ControlAddr == "" {
+		cfg.Daemon.ControlAddr = DefaultControlAddr
+	}
+	if cfg.Daemon.ControlTokenFile == "" {
+		cfg.Daemon.ControlTokenFile = "~/.aor/control-token"
+	}
 	if cfg.Alerts.BudgetThresholdPct == 0 {
 		cfg.Alerts.BudgetThresholdPct = DefaultBudgetThresholdPct
 	}

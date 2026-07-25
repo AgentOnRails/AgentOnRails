@@ -1,6 +1,7 @@
 package x402
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"gopkg.in/yaml.v3"
 
+	"github.com/agentOnRails/agent-on-rails/approval"
 	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
@@ -30,8 +32,17 @@ type X402RailConfig struct {
 	AllowedNetworks []string `yaml:"allowed_networks"`
 
 	RequireApprovalAboveUSD string `yaml:"require_approval_above_usd"`
+	// ApprovalTimeoutSec overrides how long a held payment waits for a
+	// human decision (via the daemon's control API) before being treated
+	// as denied. 0 = approval.DefaultTimeout (5 minutes).
+	ApprovalTimeoutSec int `yaml:"approval_timeout_sec"`
 
 	SkipPreVerify bool `yaml:"skip_pre_verify"`
+
+	// AllowUpto opts this agent into the x402 "upto" scheme. See
+	// X402Policy.AllowUpto's doc comment in rail.go for why this defaults
+	// false rather than being auto-selected whenever a server offers it.
+	AllowUpto bool `yaml:"allow_upto"`
 
 	Velocity VelocityConfig `yaml:"velocity"`
 
@@ -83,6 +94,7 @@ func BuildPolicy(facilitatorURL string, rc *X402RailConfig) (*X402Policy, error)
 		BlockedHosts:    rc.BlockedHosts,
 		AllowedNetworks: rc.AllowedNetworks,
 		SkipPreVerify:   rc.SkipPreVerify,
+		AllowUpto:       rc.AllowUpto,
 	}
 
 	if policy.FacilitatorURL == "" {
@@ -109,6 +121,9 @@ func BuildPolicy(facilitatorURL string, rc *X402RailConfig) (*X402Policy, error)
 	policy.UpstreamTimeout = durSec(rc.UpstreamTimeoutSec, defaultUpstreamTimeout)
 	policy.FacilitatorTimeout = durSec(rc.FacilitatorTimeoutSec, defaultFacilitatorTimeout)
 	policy.PayloadTTL = durSec(rc.PayloadTTLSec, defaultPayloadTTL)
+	if rc.ApprovalTimeoutSec > 0 {
+		policy.ApprovalTimeout = time.Duration(rc.ApprovalTimeoutSec) * time.Second
+	}
 
 	policy.VelocityMaxPerMinute = rc.Velocity.MaxPerMinute
 	policy.VelocityMaxPerHour = rc.Velocity.MaxPerHour
@@ -179,6 +194,26 @@ func Factory(p rail.FactoryParams) (rail.Rail, bool, error) {
 		)
 	}
 	policy.PrivateKey = key
+
+	// Wire the human-approval gate to the daemon's shared pending-approval
+	// registry, if one was provided — without this, RequireApprovalAboveCents
+	// has nowhere to route a held payment to and always fails closed (see
+	// docs/ROADMAP.md Phase 7). p.Approvals is nil in contexts that don't
+	// wire one up (some tests), in which case behavior is unchanged from
+	// before this field existed: no approver configured.
+	if p.Approvals != nil {
+		agentID := p.AgentID
+		timeout := policy.ApprovalTimeout
+		policy.ApprovalFunc = func(ctx context.Context, req ApprovalRequest) (bool, error) {
+			return p.Approvals.Await(ctx, approval.Request{
+				AgentID:     agentID,
+				RailType:    "x402",
+				Endpoint:    req.Endpoint,
+				AmountCents: req.AmountCents,
+				TaskContext: req.TaskContext,
+			}, timeout)
+		}
+	}
 
 	r, err := NewX402Rail(policy, p.Audit, p.Logger)
 	if err != nil {

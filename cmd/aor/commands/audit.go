@@ -60,7 +60,7 @@ var auditCmd = &cobra.Command{
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "TIME\tAGENT\tSTATUS\tAMOUNT\tENDPOINT\tTX HASH\tBLOCK REASON")
+		fmt.Fprintln(tw, "TIME\tAGENT\tSTATUS\tAMOUNT\tENDPOINT\tTX HASH\tCALLER DID\tBLOCK REASON")
 		for _, t := range txns {
 			amount := "-"
 			if t.AmountUSD > 0 {
@@ -70,17 +70,24 @@ var auditCmd = &cobra.Command{
 			if len(txHash) > 12 {
 				txHash = txHash[:10] + "…"
 			}
+			callerDID := t.CallerDID
+			if callerDID == "" {
+				callerDID = "-"
+			} else {
+				callerDID = truncate(callerDID, 20)
+			}
 			blockReason := t.BlockReason
 			if blockReason == "" {
 				blockReason = "-"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				t.Timestamp.Format("01-02 15:04:05"),
 				t.AgentID,
 				t.Status,
 				amount,
 				truncate(t.Endpoint, 50),
 				txHash,
+				callerDID,
 				blockReason,
 			)
 		}
