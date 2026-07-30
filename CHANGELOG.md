@@ -4,21 +4,53 @@ All notable changes to AgentOnRails are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-30
+
+### Added
+- Solana support for the x402 rail, via a new pluggable chain-signer
+  registry (`internal/rail/x402/chainsign`) that splits chain-specific
+  signing out of the core rail: `chainsign/eip155` (existing EVM/EIP-712
+  path) and `chainsign/solana` (ed25519, SPL `TransferChecked`, live
+  blockhash fetch). New `key_type` config (`ecdsa`/`ed25519`),
+  `aor credentials set-wallet --key-type`, and `aor agents create` now
+  prompts for Solana mainnet/devnet alongside the existing EVM chains.
+  Solana's signing model has one real difference from every EVM chain
+  here: EIP-3009 is gasless, but a Solana transaction always needs a fee
+  payer, so a Solana-keyed agent's wallet needs its own small SOL balance
+  for network fees.
+- Cross-language e2e proof that budget enforcement holds identically for
+  curl/Python/Node clients hitting the proxy, not just Go's own client.
+- Tamper-evident, hash-chained audit log (`internal/audit/hashchain.go`):
+  every row chains to the previous row's hash; `aor audit verify` checks
+  the chain end to end.
+- `internal/bootstrap`: extracted the wallet/config bootstrap and
+  testnet-funding-wait logic `scripts/demo` already used into a reusable
+  package, now shared by the new `scripts/hermes-quickstart` partner
+  integration path (`docs/hermes-integration.md`).
+- Windows install script (`scripts/install.ps1`).
 
 ### Changed
-- `aor mcp` is now a client of the daemon's own proxy for `request_payment`
-  instead of embedding its own independent x402 rail — it no longer
-  decrypts the wallet key or tracks budget itself, so `aor start` must
-  already be running for the agent or `request_payment` fails with a clear
-  error instead of paying without a shared policy engine. `--passphrase`/
-  `AOR_PASSPHRASE` are no longer needed by `aor mcp` as a result.
-  `get_balance`/`get_spend_history`/`get_policy` are unaffected — they read
-  the shared audit log and config directly and still work with the daemon
-  down. HTTPS-paid endpoints through MCP now depend on the daemon's
+- **`aor mcp` no longer bypasses policy controls.** Previously, MCP mode
+  built its own independent in-process x402 rail — decrypting the wallet
+  key and tracking its own budget state separately from whatever `aor
+  start`'s daemon was enforcing. A payment made through MCP could clear
+  even if the equivalent daemon-side agent was paused, or its policy had
+  just been reloaded, because MCP never talked to the daemon at all. Now
+  `aor mcp` is a pure HTTP client of the daemon's own proxy for
+  `request_payment` — it no longer decrypts the wallet key or tracks
+  budget itself, so `aor start` must already be running or
+  `request_payment` fails with a clear error instead of paying under a
+  separate, unenforced policy engine. `--passphrase`/`AOR_PASSPHRASE` are
+  no longer needed by `aor mcp` as a result. `get_balance`/
+  `get_spend_history`/`get_policy` are unaffected — they read the shared
+  audit log and config directly and still work with the daemon down.
+  HTTPS-paid endpoints through MCP now depend on the daemon's
   `daemon.https_intercept: true` (a warning is printed, not an error, if
-  it's off) — `aor mcp` trusts that CA internally, so this doesn't push any
-  new burden onto the calling agent/developer.
+  it's off). Remaining, honestly-documented scope limit: this doesn't stop
+  an agent with its own separate shell/browser/HTTP tool from bypassing
+  these MCP tools entirely for a given call — that needs network-level
+  egress lockdown, not this fix (see the README's proxy-vs-MCP scope
+  table).
 - `scripts/hermes-quickstart` now starts `aor start` in the background
   (enabling `https_intercept` on a freshly-created config) before handing
   off to `aor mcp`, since the latter can no longer function standalone.
