@@ -8,8 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/config"
+	"github.com/agentOnRails/agent-on-rails/internal/audit"
+	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
 var spendCmd = &cobra.Command{
@@ -44,13 +45,14 @@ var spendCmd = &cobra.Command{
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "AGENT\tPERIOD\tSPENT (USD)\tSINCE")
 		for _, id := range agentIDs {
+			now := time.Now().UTC()
 			periods := []struct {
 				name  string
 				since time.Time
 			}{
-				{"daily", time.Now().UTC().Truncate(24 * time.Hour)},
-				{"weekly", weekStart(time.Now().UTC())},
-				{"monthly", monthStart(time.Now().UTC())},
+				{"daily", rail.DayStart(now)},
+				{"weekly", rail.CurrentWeekStart(now)},
+				{"monthly", rail.CurrentMonthStart(now)},
 			}
 			for _, p := range periods {
 				spent, err := db.SpendSummary(id, p.since)
@@ -63,17 +65,4 @@ var spendCmd = &cobra.Command{
 		}
 		return tw.Flush()
 	},
-}
-
-func weekStart(t time.Time) time.Time {
-	wd := int(t.Weekday())
-	if wd == 0 {
-		wd = 7
-	}
-	return t.Truncate(24 * time.Hour).AddDate(0, 0, -(wd - 1))
-}
-
-func monthStart(t time.Time) time.Time {
-	y, m, _ := t.Date()
-	return time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
 }

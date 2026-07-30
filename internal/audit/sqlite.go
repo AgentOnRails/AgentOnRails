@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
@@ -18,6 +19,14 @@ import (
 // SQLiteAuditLogger writes transaction records to a SQLite database.
 type SQLiteAuditLogger struct {
 	db *sql.DB
+
+	// hashMu serializes LogTransaction's read-then-insert of the hash chain
+	// (see rowHash in hashchain.go) — two concurrent inserts must not both
+	// read the same "previous row" and each compute a hash that only accounts
+	// for one side of the fork. SQLite itself would still serialize the
+	// actual writes, but not the read-compute-write sequence as one atomic
+	// step, so this needs a Go-level lock in front of it regardless.
+	hashMu sync.Mutex
 }
 
 // NewSQLiteAuditLogger opens (or creates) the SQLite database at path and
@@ -43,14 +52,28 @@ func NewSQLiteAuditLogger(path string) (*SQLiteAuditLogger, error) {
 // Close releases the database connection.
 func (a *SQLiteAuditLogger) Close() error { return a.db.Close() }
 
-// LogTransaction implements rail.AuditLogger.
+// LogTransaction implements rail.AuditLogger. Every row is chained to the one
+// before it via a content hash (see hashchain.go) so a later `aor audit
+// verify` can detect a row edited or deleted outside this code path — the
+// hash chain must be computed and inserted as one atomic step relative to
+// other LogTransaction calls, hence hashMu.
 func (a *SQLiteAuditLogger) LogTransaction(tx rail.TransactionRecord) error {
-	_, err := a.db.Exec(`
+	a.hashMu.Lock()
+	defer a.hashMu.Unlock()
+
+	prevHash, err := a.lastRowHash()
+	if err != nil {
+		return fmt.Errorf("audit: read previous row hash: %w", err)
+	}
+	rowHash := computeRowHash(prevHash, tx)
+
+	_, err = a.db.Exec(`
 		INSERT INTO transactions
 		  (id, agent_id, timestamp, rail_type, endpoint, method,
 		   amount_usd, amount_raw, asset, network, tx_hash,
-		   status, block_reason, task_context, caller_did, latency_ms)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   status, block_reason, task_context, caller_did, latency_ms,
+		   row_hash)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		tx.ID,
 		tx.AgentID,
 		tx.Timestamp.Unix(),
@@ -67,11 +90,25 @@ func (a *SQLiteAuditLogger) LogTransaction(tx rail.TransactionRecord) error {
 		tx.TaskContext,
 		tx.CallerDID,
 		tx.LatencyMS,
+		rowHash,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert transaction: %w", err)
 	}
 	return nil
+}
+
+// lastRowHash returns the row_hash of the most recently inserted transaction
+// row (by SQLite's implicit rowid, which is monotonically increasing insertion
+// order), or "" if the table is empty — the genesis case computeRowHash
+// expects for the first row in the chain.
+func (a *SQLiteAuditLogger) lastRowHash() (string, error) {
+	var hash string
+	err := a.db.QueryRow(`SELECT row_hash FROM transactions ORDER BY rowid DESC LIMIT 1`).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return hash, err
 }
 
 // ─── Budget state persistence ──────────────────────────────────────────────────
@@ -252,7 +289,15 @@ CREATE INDEX IF NOT EXISTS idx_violations_agent_ts
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
-	return addColumnIfMissing(db, "transactions", "caller_did", "TEXT NOT NULL DEFAULT ''")
+	if err := addColumnIfMissing(db, "transactions", "caller_did", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// row_hash backfills as '' on any pre-existing rows from before this
+	// column existed — VerifyChain treats a row with an empty row_hash as
+	// the start of a new chain segment rather than a broken link, so
+	// upgrading an existing database doesn't retroactively (and falsely)
+	// report tampering on rows written before hashing existed.
+	return addColumnIfMissing(db, "transactions", "row_hash", "TEXT NOT NULL DEFAULT ''")
 }
 
 // addColumnIfMissing adds column to table if it isn't already present —

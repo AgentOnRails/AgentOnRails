@@ -77,6 +77,21 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	return generateCA(certPath, keyPath)
 }
 
+// LoadCACertPEM reads just the public CA certificate (PEM-encoded) from dir,
+// without touching the private signing key. Unlike LoadOrCreateCA, it never
+// generates anything — callers that only need a trust anchor (e.g. aor mcp
+// building its own outbound TLS trust pool) have no business holding the key
+// that mints per-host certs. Returns an error if dir has no CA yet (the
+// daemon hasn't started with https_intercept enabled).
+func LoadCACertPEM(dir string) ([]byte, error) {
+	certPath := filepath.Join(dir, caCertFile)
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("no interception CA at %s yet — start `aor start` with daemon.https_intercept: true first: %w", certPath, err)
+	}
+	return certPEM, nil
+}
+
 func parseCA(certPEM, keyPEM []byte, certPath string) (*CA, error) {
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil {

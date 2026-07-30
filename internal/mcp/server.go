@@ -8,16 +8,33 @@
 //   - get_balance      — wallet address + remaining budget per period
 //   - get_spend_history — paginated transaction audit log
 //   - get_policy       — active spend policy (no private keys)
+//
+// request_payment is a client of the daemon's own proxy for this agent — it
+// does not embed its own copy of the rail or ever touch the wallet key. That
+// means exactly one process (the daemon started by `aor start`) ever holds
+// the decrypted key and runs the one live budget tracker; this server simply
+// forwards the request the same way any HTTP client behind the proxy would,
+// and cannot function at all unless that daemon is running for this agent.
+// get_balance/get_spend_history/get_policy don't depend on the daemon — they
+// read the shared audit log and config directly, so they still work even
+// when it's down.
+//
+// Policy (budget/velocity/endpoint) is only enforced for requests that
+// actually go through request_payment. This server has no way to see or
+// control traffic an agent sends via a different tool (shell, browser,
+// its own HTTP client) — that's a separate limitation the daemon's proxy
+// can't fully close either, short of network-level egress lockdown.
 package mcp
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,38 +46,75 @@ import (
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
-	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/config"
+	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
+	"github.com/agentOnRails/agent-on-rails/rail"
 )
 
 // Server wraps the MCP toolset for a single AgentOnRails agent.
 type Server struct {
-	agentCfg *config.AgentConfig
-	railCfg  *x402.X402RailConfig
-	policy   *x402.X402Policy
-	rail     *x402.X402Rail
-	auditDB  *audit.SQLiteAuditLogger
-	logger   *zap.Logger
+	agentCfg   *config.AgentConfig
+	railCfg    *x402.X402RailConfig
+	policy     *x402.X402Policy
+	auditDB    *audit.SQLiteAuditLogger
+	logger     *zap.Logger
+	httpClient *http.Client // client of the daemon's proxy for this agent
+	proxyAddr  string       // e.g. "127.0.0.1:8402" — for error messages only
 }
 
-// New creates an MCP Server. policy must already have PrivateKey populated.
+// New creates an MCP Server. policy is used for read-only display only
+// (get_balance/get_policy) — it must NOT have PrivateKey populated; this
+// server never signs anything itself. httpClient must already be configured
+// to route requests through the daemon's proxy for this agent (Transport.Proxy
+// set to proxyAddr, and TLSClientConfig.RootCAs trusting the daemon's
+// interception CA if https_intercept is enabled) — see BuildProxyClient.
 func New(
 	agentCfg *config.AgentConfig,
 	railCfg *x402.X402RailConfig,
 	policy *x402.X402Policy,
-	rail *x402.X402Rail,
+	httpClient *http.Client,
+	proxyAddr string,
 	auditDB *audit.SQLiteAuditLogger,
 	logger *zap.Logger,
 ) *Server {
 	return &Server{
-		agentCfg: agentCfg,
-		railCfg:  railCfg,
-		policy:   policy,
-		rail:     rail,
-		auditDB:  auditDB,
-		logger:   logger,
+		agentCfg:   agentCfg,
+		railCfg:    railCfg,
+		policy:     policy,
+		auditDB:    auditDB,
+		logger:     logger,
+		httpClient: httpClient,
+		proxyAddr:  proxyAddr,
 	}
+}
+
+// BuildProxyClient builds an *http.Client that routes requests through the
+// daemon's forward-proxy port for one agent — the same way any other HTTP
+// client behind the proxy (HTTP_PROXY/HTTPS_PROXY) would. If caCertPEM is
+// non-nil, it's added to the client's own trust pool so HTTPS targets work
+// when the daemon has https_intercept enabled, with no trust-store change
+// required on the caller's end — this client is the only thing that needs
+// to trust it.
+func BuildProxyClient(proxyAddr string, caCertPEM []byte, timeout time.Duration) (*http.Client, error) {
+	proxyURL, err := url.Parse("http://" + proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("parse proxy addr %q: %w", proxyAddr, err)
+	}
+
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	if caCertPEM != nil {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(caCertPEM) {
+			return nil, fmt.Errorf("interception CA cert is not valid PEM")
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+	}
+
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
 // Build constructs the mcp-go MCPServer with all tools registered.
@@ -75,7 +129,16 @@ func (s *Server) Build() *mcpsrv.MCPServer {
 				"Use request_payment to fetch paid resources via the x402 rail, "+
 				"get_balance to check remaining budget, "+
 				"get_spend_history to review past transactions, and "+
-				"get_policy to inspect active spend controls.",
+				"get_policy to inspect active spend controls. "+
+				"IMPORTANT: these tools are the only path that enforces spend limits, "+
+				"velocity limits, and endpoint policy. Any request you make with a "+
+				"different tool (shell, browser, direct HTTP) bypasses this policy "+
+				"entirely and is not budgeted, limited, or audited. Always route "+
+				"requests to URLs that may require payment through request_payment "+
+				"instead of fetching them yourself. request_payment requires the "+
+				"AgentOnRails proxy daemon (`aor start`) to already be running for "+
+				"this agent — if it isn't, the call fails with a clear error rather "+
+				"than silently skipping policy.",
 			s.agentCfg.AgentID,
 		)),
 	)
@@ -104,7 +167,9 @@ func (s *Server) requestPaymentTool() mcplib.Tool {
 			"Make an HTTP request to a payment-enabled API endpoint. "+
 				"AgentOnRails will automatically handle any x402 payment challenge, "+
 				"enforce the active spend policy, and return the response body. "+
-				"Use this tool to access any resource that may require a micropayment.",
+				"Use this tool to access any resource that may require a micropayment. "+
+				"Requires the AgentOnRails proxy daemon (aor start) to be running for "+
+				"this agent — this tool is a client of that daemon, not a separate engine.",
 		),
 		mcplib.WithString("url",
 			mcplib.Required(),
@@ -160,11 +225,23 @@ func (s *Server) handleRequestPayment(ctx context.Context, req mcplib.CallToolRe
 	} else if body != "" {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
+	// Read by ReverseProxyHandler.ServeHTTP on the daemon side (rail.go's
+	// headerSentinelTask) so the task label survives the network hop instead
+	// of being a same-process function argument.
+	httpReq.Header.Set("X-Sentinel-Task", taskCtx)
 
-	// Run through the x402 payment rail, capturing the response.
-	w := httptest.NewRecorder()
-	s.rail.ProxyRequest(ctx, w, httpReq, s.agentCfg.AgentID, taskCtx)
-	result := w.Result()
+	// Send through the daemon's proxy for this agent — the same path any
+	// other HTTP client behind the proxy uses. A transport-level failure here
+	// almost always means the daemon isn't running for this agent.
+	result, doErr := s.httpClient.Do(httpReq)
+	if doErr != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf(
+			"could not reach the AgentOnRails proxy for agent %q at %s (%s) — "+
+				"is `aor start` running for this agent? request_payment is a client "+
+				"of that daemon, not a standalone payment engine.",
+			s.agentCfg.AgentID, s.proxyAddr, doErr,
+		)), nil
+	}
 	defer result.Body.Close()
 
 	// Limit response body to 8 KiB to keep MCP messages reasonable.
@@ -230,27 +307,39 @@ type budgetPeriod struct {
 	ResetAt      string `json:"reset_at"`
 }
 
-func (s *Server) handleGetBalance(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-	snapshots := s.rail.Budget().Snapshot()
+// budgetWindow describes one spend period's boundaries — computed fresh per
+// call rather than read from a live tracker, so this works whether or not
+// the daemon is currently running.
+type budgetWindowDef struct {
+	period     string
+	limitCents int64
+	since      time.Time
+	resetAt    time.Time
+}
 
-	limitByCents := map[string]int64{
-		"daily":   s.policy.DailyLimitCents,
-		"weekly":  s.policy.WeeklyLimitCents,
-		"monthly": s.policy.MonthlyLimitCents,
+func (s *Server) handleGetBalance(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	now := time.Now().UTC()
+	windows := []budgetWindowDef{
+		{period: "daily", limitCents: s.policy.DailyLimitCents, since: rail.DayStart(now), resetAt: rail.NextDayStart(now)},
+		{period: "weekly", limitCents: s.policy.WeeklyLimitCents, since: rail.CurrentWeekStart(now), resetAt: rail.NextWeekStart(now)},
+		{period: "monthly", limitCents: s.policy.MonthlyLimitCents, since: rail.CurrentMonthStart(now), resetAt: rail.NextMonthStart(now)},
 	}
 
-	budgets := make([]budgetPeriod, 0, len(snapshots))
-	for _, snap := range snapshots {
-		limitCents := limitByCents[snap.Period]
-		spentUSD := fmt.Sprintf("$%.2f", float64(snap.SpentCents)/100)
+	budgets := make([]budgetPeriod, 0, len(windows))
+	for _, w := range windows {
+		spentUSD, err := s.auditDB.SpendSummary(s.agentCfg.AgentID, w.since)
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("query spend for %s: %s", w.period, err)), nil
+		}
+		spentCents := int64(spentUSD * 100)
 
 		var limitStr, remainStr string
-		if limitCents == 0 {
+		if w.limitCents == 0 {
 			limitStr = "unlimited"
 			remainStr = "unlimited"
 		} else {
-			limitStr = fmt.Sprintf("$%.2f", float64(limitCents)/100)
-			rem := limitCents - snap.SpentCents
+			limitStr = fmt.Sprintf("$%.2f", float64(w.limitCents)/100)
+			rem := w.limitCents - spentCents
 			if rem < 0 {
 				rem = 0
 			}
@@ -258,11 +347,11 @@ func (s *Server) handleGetBalance(_ context.Context, _ mcplib.CallToolRequest) (
 		}
 
 		budgets = append(budgets, budgetPeriod{
-			Period:       snap.Period,
+			Period:       w.period,
 			LimitUSD:     limitStr,
-			SpentUSD:     spentUSD,
+			SpentUSD:     fmt.Sprintf("$%.2f", spentUSD),
 			RemainingUSD: remainStr,
-			ResetAt:      snap.ResetAt.Format(time.RFC3339),
+			ResetAt:      w.resetAt.Format(time.RFC3339),
 		})
 	}
 
@@ -303,17 +392,17 @@ func (s *Server) getSpendHistoryTool() mcplib.Tool {
 }
 
 type txRow struct {
-	ID          string  `json:"id"`
-	Timestamp   string  `json:"timestamp"`
-	Endpoint    string  `json:"endpoint"`
-	Method      string  `json:"method"`
-	AmountUSD   string  `json:"amount_usd"`
-	Network     string  `json:"network,omitempty"`
-	Status      string  `json:"status"`
-	BlockReason string  `json:"block_reason,omitempty"`
-	TxHash      string  `json:"tx_hash,omitempty"`
-	TaskContext string  `json:"task_context,omitempty"`
-	LatencyMS   int64   `json:"latency_ms"`
+	ID          string `json:"id"`
+	Timestamp   string `json:"timestamp"`
+	Endpoint    string `json:"endpoint"`
+	Method      string `json:"method"`
+	AmountUSD   string `json:"amount_usd"`
+	Network     string `json:"network,omitempty"`
+	Status      string `json:"status"`
+	BlockReason string `json:"block_reason,omitempty"`
+	TxHash      string `json:"tx_hash,omitempty"`
+	TaskContext string `json:"task_context,omitempty"`
+	LatencyMS   int64  `json:"latency_ms"`
 }
 
 func (s *Server) handleGetSpendHistory(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

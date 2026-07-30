@@ -173,17 +173,31 @@ aor logs tail
 
 In addition to the transparent proxy, AgentOnRails can run as an **MCP (Model Context Protocol) server**. Instead of intercepting HTTP traffic, the agent makes payments via explicit tool calls — useful for Claude Desktop, Claude Code, Cursor, and any other MCP-compatible client.
 
-If you're building a new agent rather than retrofitting an existing HTTP client, start here: MCP mode gets full HTTPS support with no CA, no interception, and no trust-store changes at all.
+`aor mcp` is a **client of the daemon's own proxy** for one agent, not a second, independent payment engine — it forwards `request_payment` calls through `aor start`'s already-running proxy port for that agent instead of decrypting the wallet key or tracking budget itself. That means exactly one process ever holds the decrypted key and runs the one live budget tracker, whether a payment came in through MCP or through the transparent proxy — and it means **`aor start` must already be running for this agent, or `request_payment` fails outright** rather than silently paying without policy.
 
 ```
 Claude Desktop / Claude Code / Cursor
            ↓  MCP stdio (subprocess)
-       [AgentOnRails]
-           ↓
-  https://paid-api.example.com
+       [aor mcp]  ←  client of  →  [aor start]  (must already be running)
+                                        ↓
+                          https://paid-api.example.com
 ```
 
-No daemon required. `aor mcp` starts as a subprocess, talks over stdin/stdout, and exits when the client closes.
+The one thing this preserves from before: the *calling* agent/developer still never installs a CA or touches an OS trust store. `aor mcp` trusts AgentOnRails' own interception CA internally, so HTTPS-paid endpoints work transparently through it — **as long as the daemon has `daemon.https_intercept: true`** in `aor.yaml`. If it doesn't, `aor mcp` still starts (it prints a warning, not an error, so plain-HTTP test setups keep working) but won't see or handle payments on `https://` endpoints, the same limitation proxy mode already has without interception.
+
+> **Read this even though MCP now requires the daemon.** Requiring `aor
+> start` closes the "just skip the proxy" gap for `request_payment` itself,
+> but it does **not** close the separate, older gap: if your agent runtime
+> has any other way to make a network request (a shell/bash tool, a
+> browser tool, its own HTTP client, another MCP server), the agent can
+> simply not call `request_payment` for a given request, and that traffic
+> is invisible to AgentOnRails — no budget check, no velocity limit, no
+> audit entry. Giving an agent a skill or a tool description that *tells*
+> it to use AgentOnRails is guidance, not enforcement. Closing that
+> requires routing the agent's actual network egress through the proxy for
+> everything (`HTTP_PROXY`/`HTTPS_PROXY`) or an OS/container-level egress
+> rule that blocks direct internet access — MCP mode alone, even now, can't
+> do that by itself.
 
 ### Available tools
 
@@ -196,13 +210,17 @@ No daemon required. `aor mcp` starts as a subprocess, talks over stdin/stdout, a
 
 ### Prerequisites
 
-You need a configured agent before starting. If you haven't done the [Quick start](#quick-start) yet:
+You need a configured agent, **and the daemon already running for it**, before starting MCP mode. If you haven't done the [Quick start](#quick-start) yet:
 
 ```bash
 aor init
 aor agents create        # follow the wizard
 aor credentials set-wallet my-agent
+export AOR_PASSPHRASE="your-vault-passphrase"
+aor start                # aor mcp is a client of this — it must be running
 ```
+
+`aor mcp` itself no longer needs the passphrase or touches the vault — only the daemon decrypts the wallet key.
 
 ### Setup: Claude Desktop
 
@@ -215,25 +233,19 @@ Config file location:
   "mcpServers": {
     "aor-my-agent": {
       "command": "aor",
-      "args": ["mcp", "--agent", "my-agent"],
-      "env": {
-        "AOR_PASSPHRASE": "your-vault-passphrase"
-      }
+      "args": ["mcp", "--agent", "my-agent"]
     }
   }
 }
 ```
 
-Restart Claude Desktop. The four tools will appear in the tool picker.
+Restart Claude Desktop. The four tools will appear in the tool picker — but `request_payment` calls will fail with a clear error until `aor start` is running for `my-agent`.
 
 ### Setup: Claude Code CLI
 
 ```bash
 # Add the MCP server
 claude mcp add aor-my-agent -- aor mcp --agent my-agent
-
-# Set your passphrase (add to shell profile to make it persistent)
-export AOR_PASSPHRASE="your-vault-passphrase"
 ```
 
 Or edit `~/.claude/settings.json` directly:
@@ -243,10 +255,7 @@ Or edit `~/.claude/settings.json` directly:
   "mcpServers": {
     "aor-my-agent": {
       "command": "aor",
-      "args": ["mcp", "--agent", "my-agent"],
-      "env": {
-        "AOR_PASSPHRASE": "your-vault-passphrase"
-      }
+      "args": ["mcp", "--agent", "my-agent"]
     }
   }
 }
@@ -254,20 +263,18 @@ Or edit `~/.claude/settings.json` directly:
 
 ### Running multiple agents
 
-Add one entry per agent. Each instance is fully isolated — separate wallet, separate budget tracker, separate audit entries.
+Add one entry per agent. Each instance is fully isolated — separate wallet, separate budget tracker, separate audit entries. One running `aor start` daemon serves all of them; it doesn't need to be started per-agent.
 
 ```json
 {
   "mcpServers": {
     "aor-research": {
       "command": "aor",
-      "args": ["mcp", "--agent", "research"],
-      "env": { "AOR_PASSPHRASE": "your-passphrase" }
+      "args": ["mcp", "--agent", "research"]
     },
     "aor-coding": {
       "command": "aor",
-      "args": ["mcp", "--agent", "coding"],
-      "env": { "AOR_PASSPHRASE": "your-passphrase" }
+      "args": ["mcp", "--agent", "coding"]
     }
   }
 }
@@ -304,13 +311,19 @@ get_spend_history since="1h" limit=5
 
 ### Proxy mode vs MCP mode
 
-| | Proxy mode (`aor start`) | MCP mode (`aor mcp`) |
+Both modes require `aor start` running — MCP mode is a second interface onto that same daemon, not a no-daemon alternative to it.
+
+| | Proxy mode (`aor start`) | MCP mode (`aor mcp`, on top of `aor start`) |
 |---|---|---|
+| Daemon required | Yes — it *is* the daemon | Yes — `aor mcp` is a client of it; `request_payment` fails without it |
 | Agent changes needed | None — set `HTTP_PROXY` env var | Add server to MCP config |
 | Payment visibility | Transparent (agent doesn't see it) | Explicit tool calls |
-| HTTPS upstream | Opaque tunnel by default; full interception with `https_intercept` (install the local CA) | Full HTTPS support |
+| HTTPS upstream | Opaque tunnel by default; full interception with `https_intercept` | Full interception with `https_intercept` (handled internally by `aor mcp` — no CA/trust-store change for the agent either way) |
 | Works with | Any HTTP client | MCP-compatible agents only |
-| Best for | Drop-in adoption, existing agents | Claude Desktop, Claude Code, Cursor |
+| **What's actually governed** | **Every request on that port** — the agent cannot route around it without its own separate network path | **Only requests the agent chooses to make via `request_payment`** — anything sent through a different tool bypasses policy entirely, same daemon or not |
+| Best for | Drop-in adoption, existing agents; the only mode that guarantees coverage of *all* the agent's traffic | Claude Desktop, Claude Code, Cursor — explicit budget/history visibility on top of the same enforced daemon |
+
+**The remaining gap either mode can have:** an agent with its own separate network access (a shell tool, a browser tool, another MCP server) can simply not route a given request through either mode. Closing that needs routing *all* of the agent's egress through the proxy, or an OS/container-level rule that blocks direct internet access — not something either mode does by default.
 
 ---
 
@@ -405,10 +418,12 @@ aor audit [agent-id] [--since 24h] [--limit 50]
 aor credentials set-wallet <agent-id>
     Encrypt and store a wallet private key in the vault.
 
-aor mcp --agent <agent-id> [--passphrase ...]
+aor mcp --agent <agent-id>
     Start an MCP server for a single agent over stdio. Exposes request_payment,
-    get_balance, get_spend_history, and get_policy as MCP tools. Passphrase can
-    also be set via AOR_PASSPHRASE. See MCP server mode section for client config.
+    get_balance, get_spend_history, and get_policy as MCP tools. request_payment
+    is a client of aor start's proxy for this agent and requires it already
+    running — no passphrase needed here; only the daemon decrypts the wallet
+    key. See MCP server mode section for client config.
 
 aor version
     Print version and build info.

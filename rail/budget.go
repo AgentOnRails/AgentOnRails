@@ -33,19 +33,19 @@ func NewBudgetTracker(dailyLimitCents, weeklyLimitCents, monthlyLimitCents int64
 				period:     "daily",
 				limitCents: dailyLimitCents,
 				spentCents: 0,
-				resetAt:    now.Truncate(24 * time.Hour).Add(24 * time.Hour),
+				resetAt:    NextDayStart(now),
 			},
 			{
 				period:     "weekly",
 				limitCents: weeklyLimitCents,
 				spentCents: 0,
-				resetAt:    nextWeekStart(now),
+				resetAt:    NextWeekStart(now),
 			},
 			{
 				period:     "monthly",
 				limitCents: monthlyLimitCents,
 				spentCents: 0,
-				resetAt:    nextMonthStart(now),
+				resetAt:    NextMonthStart(now),
 			},
 		},
 	}
@@ -65,11 +65,11 @@ func (b *BudgetTracker) Reserve(amountCents int64) error {
 			w.spentCents = 0
 			switch w.period {
 			case "daily":
-				w.resetAt = now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+				w.resetAt = NextDayStart(now)
 			case "weekly":
-				w.resetAt = nextWeekStart(now)
+				w.resetAt = NextWeekStart(now)
 			case "monthly":
-				w.resetAt = nextMonthStart(now)
+				w.resetAt = NextMonthStart(now)
 			}
 		}
 		if w.limitCents > 0 && w.spentCents+amountCents > w.limitCents {
@@ -151,7 +151,23 @@ func (b *BudgetTracker) Snapshot() []BudgetSnapshot {
 	return out
 }
 
-func nextWeekStart(t time.Time) time.Time {
+// DayStart returns the start (UTC midnight) of t's calendar day.
+func DayStart(t time.Time) time.Time {
+	return t.UTC().Truncate(24 * time.Hour)
+}
+
+// NextDayStart returns the start of the calendar day after t's.
+func NextDayStart(t time.Time) time.Time {
+	return DayStart(t).Add(24 * time.Hour)
+}
+
+// CurrentWeekStart returns the start (UTC midnight Monday) of t's week.
+func CurrentWeekStart(t time.Time) time.Time {
+	return NextWeekStart(t).Add(-7 * 24 * time.Hour)
+}
+
+// NextWeekStart returns the start (UTC midnight Monday) of the week after t's.
+func NextWeekStart(t time.Time) time.Time {
 	weekday := int(t.Weekday())
 	if weekday == 0 {
 		weekday = 7
@@ -160,7 +176,14 @@ func nextWeekStart(t time.Time) time.Time {
 	return t.Truncate(24 * time.Hour).Add(time.Duration(daysUntilMonday) * 24 * time.Hour)
 }
 
-func nextMonthStart(t time.Time) time.Time {
+// CurrentMonthStart returns the start (UTC midnight, day 1) of t's calendar month.
+func CurrentMonthStart(t time.Time) time.Time {
+	y, m, _ := t.Date()
+	return time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
+}
+
+// NextMonthStart returns the start of the calendar month after t's.
+func NextMonthStart(t time.Time) time.Time {
 	y, m, _ := t.Date()
 	return time.Date(y, m+1, 1, 0, 0, 0, 0, time.UTC)
 }

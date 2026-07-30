@@ -4,6 +4,25 @@ All notable changes to AgentOnRails are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- `aor mcp` is now a client of the daemon's own proxy for `request_payment`
+  instead of embedding its own independent x402 rail — it no longer
+  decrypts the wallet key or tracks budget itself, so `aor start` must
+  already be running for the agent or `request_payment` fails with a clear
+  error instead of paying without a shared policy engine. `--passphrase`/
+  `AOR_PASSPHRASE` are no longer needed by `aor mcp` as a result.
+  `get_balance`/`get_spend_history`/`get_policy` are unaffected — they read
+  the shared audit log and config directly and still work with the daemon
+  down. HTTPS-paid endpoints through MCP now depend on the daemon's
+  `daemon.https_intercept: true` (a warning is printed, not an error, if
+  it's off) — `aor mcp` trusts that CA internally, so this doesn't push any
+  new burden onto the calling agent/developer.
+- `scripts/hermes-quickstart` now starts `aor start` in the background
+  (enabling `https_intercept` on a freshly-created config) before handing
+  off to `aor mcp`, since the latter can no longer function standalone.
+
 ## [0.1.0] - 2026-07-25
 
 ### Added

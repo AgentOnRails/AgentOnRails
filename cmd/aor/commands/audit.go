@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/config"
+	"github.com/agentOnRails/agent-on-rails/internal/audit"
 )
 
 var (
@@ -95,9 +95,54 @@ var auditCmd = &cobra.Command{
 	},
 }
 
+var auditVerifyCmd = &cobra.Command{
+	Use:   "verify",
+	Short: "Check the audit log's hash chain for tampering",
+	Long: `Walks every transaction row in the order it was written and recomputes
+each one's expected hash from its own fields plus the row before it.
+
+Every row's hash chains in the one before it, so editing or deleting any row
+(e.g. by opening audit.db directly instead of going through the daemon)
+breaks the stored hash of every row written after it — not just its own.
+This command reports the first row where that break shows up.
+
+A clean result means every row this command can see is exactly what the
+daemon wrote, in the order it wrote it. Exits non-zero if a break is found,
+so this is safe to use as a scripted integrity check.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		global, err := config.LoadGlobal(globalConfigPath)
+		if err != nil {
+			return err
+		}
+
+		db, err := audit.NewSQLiteAuditLogger(config.ExpandHomePath(global.Daemon.AuditDB))
+		if err != nil {
+			return fmt.Errorf("open audit db: %w", err)
+		}
+		defer db.Close()
+
+		brk, err := db.VerifyChain()
+		if err != nil {
+			return fmt.Errorf("verify audit chain: %w", err)
+		}
+		if brk == nil {
+			fmt.Println("OK — audit log hash chain verified, no tampering detected.")
+			return nil
+		}
+
+		fmt.Printf("TAMPERING DETECTED at row %d (transaction %s, %s):\n", brk.RowID, brk.TransactionID, brk.Timestamp.Format(time.RFC3339))
+		fmt.Printf("  expected hash: %s\n", brk.Expected)
+		fmt.Printf("  stored hash:   %s\n", brk.Stored)
+		fmt.Println("This row (or one before it) does not match what the daemon originally wrote.")
+		return fmt.Errorf("audit log hash chain broken at transaction %s", brk.TransactionID)
+	},
+}
+
 func init() {
 	auditCmd.Flags().StringVar(&auditSince, "since", "", "Only show transactions from the last duration (e.g. 24h, 7d)")
 	auditCmd.Flags().IntVar(&auditLimit, "limit", 50, "Maximum number of rows to return")
+	auditCmd.AddCommand(auditVerifyCmd)
 }
 
 func truncate(s string, max int) string {

@@ -33,6 +33,7 @@ type Daemon struct {
 	agents     []*agentRuntime
 	db         *audit.SQLiteAuditLogger
 	alerter    *alert.Alerter
+	railAudit  rail.AuditLogger // db wrapped with alert.AuditLogger — what rails actually log through
 	vault      *vault.Vault
 	ca         *x402.CA // non-nil when HTTPS interception is enabled
 	logger     *zap.Logger
@@ -99,6 +100,7 @@ func New(
 		cfg:        cfg,
 		db:         db,
 		alerter:    alerter,
+		railAudit:  &alert.AuditLogger{Inner: db, Alerter: alerter},
 		vault:      v,
 		ca:         ca,
 		logger:     logger,
@@ -225,7 +227,7 @@ func (d *Daemon) buildAgentRail(agentCfg *config.AgentConfig) (active rail.Rail,
 			Global:     d.cfg,
 			Vault:      d.vault,
 			Passphrase: d.passphrase,
-			Audit:      d.db,
+			Audit:      d.railAudit,
 			Logger:     d.logger,
 			Approvals:  d.approvals,
 		})

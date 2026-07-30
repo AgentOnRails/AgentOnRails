@@ -47,7 +47,12 @@ echo "Installing aor $AOR_VERSION ($OS/$ARCH) → $INSTALL_DIR/$BINARY"
 
 # ── download ──────────────────────────────────────────────────────────────────
 
-FILENAME="${BINARY}_${AOR_VERSION}_${OS}_${ARCH}.tar.gz"
+# GoReleaser names archive assets without the tag's leading "v" (e.g. tag
+# v0.1.0 -> aor_0.1.0_linux_amd64.tar.gz) even though the release path
+# itself uses the full tag — strip it here, not from AOR_VERSION, so the
+# download path below still resolves.
+ARCHIVE_VERSION="${AOR_VERSION#v}"
+FILENAME="${BINARY}_${ARCHIVE_VERSION}_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/$AOR_VERSION/$FILENAME"
 
 TMP="$(mktemp -d)"

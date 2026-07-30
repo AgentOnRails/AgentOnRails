@@ -3,24 +3,26 @@ package commands
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
+	"net"
+	"strconv"
+	"time"
 
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/config"
+	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	aormcp "github.com/agentOnRails/agent-on-rails/internal/mcp"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
-	"github.com/agentOnRails/agent-on-rails/vault"
 )
 
-var (
-	mcpAgentID    string
-	mcpPassphrase string
-)
+var mcpAgentID string
+
+// mcpClientTimeout must comfortably exceed the longest a request can
+// legitimately block — a payment held for human approval, up to the agent's
+// approval_timeout_sec (default 300s per README). This is the client-side
+// bound on that same wait, not a new limit of its own.
+const mcpClientTimeout = 6 * time.Minute
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
@@ -39,20 +41,29 @@ Add to Claude Desktop's MCP server config (~/.claude/claude_desktop_config.json)
     "mcpServers": {
       "aor-my-agent": {
         "command": "aor",
-        "args": ["mcp", "--agent", "my-agent"],
-        "env": { "AOR_PASSPHRASE": "your-passphrase" }
+        "args": ["mcp", "--agent", "my-agent"]
       }
     }
   }
 
-The wallet passphrase can be supplied via --passphrase or AOR_PASSPHRASE.`,
+IMPORTANT: request_payment is a client of the daemon's own proxy for this
+agent, not a separate payment engine — it does not decrypt the wallet key
+or track budget itself. "aor start" must already be running for this agent
+or every request_payment call will fail with a clear connection error. If
+the daemon's aor.yaml has daemon.https_intercept: false (the default),
+payments on https:// endpoints won't be seen or handled through this tool
+either — a warning is printed at startup, but it still starts, so plain
+HTTP test setups (scripts/testserver) keep working unmodified.
+
+get_balance/get_spend_history/get_policy read the shared audit log and
+config directly — they work even when the daemon isn't running.
+
+This is not a substitute for running the proxy: an agent with any other way
+to reach the network (a shell tool, a browser tool, its own HTTP client)
+can bypass these tools entirely for a given request, and nothing here can
+see or stop that — closing that gap needs network-level egress lockdown,
+not this command.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if mcpPassphrase == "" {
-			mcpPassphrase = os.Getenv("AOR_PASSPHRASE")
-		}
-		if mcpPassphrase == "" {
-			return fmt.Errorf("wallet passphrase required: use --passphrase or set AOR_PASSPHRASE")
-		}
 		if mcpAgentID == "" {
 			return fmt.Errorf("--agent is required (e.g. aor mcp --agent my-agent)")
 		}
@@ -80,34 +91,12 @@ The wallet passphrase can be supplied via --passphrase or AOR_PASSPHRASE.`,
 			return fmt.Errorf("agent %q does not have the x402 rail enabled — set rails.x402.enabled: true", mcpAgentID)
 		}
 
+		// Read-only: this policy is never given a PrivateKey. Only the daemon
+		// this server forwards to ever decrypts the wallet key.
 		policy, err := x402.BuildPolicy(global.Facilitators.X402, railCfg)
 		if err != nil {
 			return fmt.Errorf("build policy: %w", err)
 		}
-
-		v, err := vault.New(config.ExpandHomePath(global.Daemon.VaultDir))
-		if err != nil {
-			return fmt.Errorf("open vault: %w", err)
-		}
-
-		keyBytes, err := v.LoadKey(mcpAgentID, mcpPassphrase)
-		if err != nil {
-			return fmt.Errorf("load wallet for %q: %w\n(run `aor credentials set-wallet %s` to store the key)", mcpAgentID, err, mcpAgentID)
-		}
-		key, err := ethcrypto.ToECDSA(keyBytes)
-		if err != nil {
-			return fmt.Errorf("parse wallet key for %q: %w", mcpAgentID, err)
-		}
-
-		derivedAddr := ethcrypto.PubkeyToAddress(key.PublicKey).Hex()
-		if !strings.EqualFold(derivedAddr, policy.WalletAddress) {
-			return fmt.Errorf(
-				"wallet mismatch for agent %q: loaded key maps to %s but config wallet_address is %s\n"+
-					"Update wallet_address in the agent config or re-run `aor credentials set-wallet %s`",
-				mcpAgentID, derivedAddr, policy.WalletAddress, mcpAgentID,
-			)
-		}
-		policy.PrivateKey = key
 
 		db, err := audit.NewSQLiteAuditLogger(config.ExpandHomePath(global.Daemon.AuditDB))
 		if err != nil {
@@ -122,27 +111,36 @@ The wallet passphrase can be supplied via --passphrase or AOR_PASSPHRASE.`,
 		}
 		defer logger.Sync() //nolint:errcheck
 
-		rail, err := x402.NewX402Rail(policy, db, logger)
-		if err != nil {
-			return fmt.Errorf("init x402 rail: %w", err)
-		}
+		proxyAddr := net.JoinHostPort(global.Daemon.ListenAddr, strconv.Itoa(agentCfg.ProxyPort))
 
-		// Rehydrate in-memory budget from the persisted DB state.
-		if states, hydErr := db.RehydrateBudget(mcpAgentID); hydErr != nil {
-			logger.Warn("budget rehydration failed — starting from zero", zap.Error(hydErr))
-		} else {
-			for _, s := range states {
-				rail.Budget().Seed(s.Period, s.SpentCents)
+		var caCertPEM []byte
+		if global.Daemon.HTTPSIntercept {
+			pem, caErr := x402.LoadCACertPEM(config.ExpandHomePath(global.Daemon.CADir))
+			if caErr != nil {
+				logger.Warn("https_intercept is enabled but the interception CA isn't on disk yet — "+
+					"HTTPS-paid endpoints won't be handled through request_payment until `aor start` "+
+					"has run at least once to generate it",
+					zap.Error(caErr))
+			} else {
+				caCertPEM = pem
 			}
+		} else {
+			logger.Warn("daemon.https_intercept is false — request_payment will not see or handle " +
+				"payments on https:// endpoints (only plain HTTP). Set daemon.https_intercept: true " +
+				"in aor.yaml and restart `aor start` if you need HTTPS support.")
 		}
 
-		srv := aormcp.New(agentCfg, railCfg, policy, rail, db, logger)
+		httpClient, err := aormcp.BuildProxyClient(proxyAddr, caCertPEM, mcpClientTimeout)
+		if err != nil {
+			return fmt.Errorf("build proxy client: %w", err)
+		}
+
+		srv := aormcp.New(agentCfg, railCfg, policy, httpClient, proxyAddr, db, logger)
 		return srv.ServeStdio(context.Background())
 	},
 }
 
 func init() {
 	mcpCmd.Flags().StringVar(&mcpAgentID, "agent", "", "Agent ID to serve (required) — matches the filename in ~/.aor/agents/")
-	mcpCmd.Flags().StringVar(&mcpPassphrase, "passphrase", "", "Wallet decryption passphrase (prefer AOR_PASSPHRASE env var)")
 	_ = mcpCmd.MarkFlagRequired("agent")
 }

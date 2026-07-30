@@ -29,9 +29,9 @@ import (
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
-	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/config"
 	"github.com/agentOnRails/agent-on-rails/daemon"
+	"github.com/agentOnRails/agent-on-rails/internal/audit"
 	"github.com/agentOnRails/agent-on-rails/internal/rail/x402"
 	"github.com/agentOnRails/agent-on-rails/rail"
 	"github.com/agentOnRails/agent-on-rails/vault"
@@ -41,11 +41,14 @@ const testPassphrase = "e2e-test-passphrase"
 
 // daemonFixture holds everything needed to drive an e2e test against a live daemon.
 type daemonFixture struct {
-	ProxyURL  string // e.g. "http://127.0.0.1:8402"
-	AuditDB   *audit.SQLiteAuditLogger
-	Upstream  *httptest.Server // mock x402 upstream
-	DBPath    string
-	cancel    context.CancelFunc
+	ProxyURL   string // e.g. "http://127.0.0.1:8402"
+	ProxyAddr  string // e.g. "127.0.0.1:8402" — for tests that build their own proxy-aware client
+	AuditDB    *audit.SQLiteAuditLogger
+	Upstream   *httptest.Server // mock x402 upstream
+	DBPath     string
+	ConfigPath string // aor.yaml written for this fixture
+	AgentsDir  string // directory holding e2e-agent.yaml
+	cancel     context.CancelFunc
 }
 
 // daemonOptions configures the test daemon's x402 policy.
@@ -219,11 +222,14 @@ rails:
 	})
 
 	return &daemonFixture{
-		ProxyURL: proxyURL,
-		AuditDB:  db,
-		Upstream: upstream,
-		DBPath:   dbPath,
-		cancel:   cancel,
+		ProxyURL:   proxyURL,
+		ProxyAddr:  fmt.Sprintf("127.0.0.1:%d", proxyPort),
+		AuditDB:    db,
+		Upstream:   upstream,
+		DBPath:     dbPath,
+		ConfigPath: globalCfgPath,
+		AgentsDir:  agentsDir,
+		cancel:     cancel,
 	}
 }
 
@@ -357,8 +363,8 @@ type ScenarioFile struct {
 	Steps       []ScenarioStep `yaml:"steps"`
 
 	// For single-loop scenarios (velocity_attack.yaml)
-	RepeatCount          int    `yaml:"repeat_count"`
-	ExpectLastStatus     int    `yaml:"expect_last_status"`
+	RepeatCount            int    `yaml:"repeat_count"`
+	ExpectLastStatus       int    `yaml:"expect_last_status"`
 	ExpectLastBodyContains string `yaml:"expect_last_body_contains"`
 }
 

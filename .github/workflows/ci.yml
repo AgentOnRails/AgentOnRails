@@ -5,10 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
-    name: Unit tests
+    name: Unit + integration tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,17 +23,58 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Unit tests
-        run: go test ./internal/... -count=1 -race -timeout=120s -coverprofile=coverage.out -covermode=atomic
-
-      - name: Integration tests
-        run: go test ./test/integration/... -count=1 -race -timeout=120s
+      # Every top-level + internal package except test/e2e (which has its own
+      # step below) — was previously scoped to ./internal/... only, silently
+      # excluding rail/, vault/, daemon/, approval/, config/, and cmd/aor's own
+      # tests from CI despite all of them existing and passing locally.
+      - name: Unit + integration tests
+        run: go test $(go list ./... | grep -v /test/e2e) -count=1 -race -timeout=120s -coverprofile=coverage.out -covermode=atomic
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
+      # Mock-upstream e2e (real daemon, real HTTP, fake upstream/facilitator —
+      # no real chain, no funded wallet needed). The Sepolia real-chain tests
+      # in this same package self-skip via t.Skip unless TEST_SEPOLIA=1 is set
+      # (see test/e2e/sepolia_test.go), so this is safe to run unconditionally.
+      - name: E2E tests (mock upstream)
+        run: go test ./test/e2e/... -count=1 -race -timeout=120s -v
+
       - name: Build CLI
         run: go build ./cmd/aor/
+
+  # Real Base Sepolia testnet payment test — opt-in only (workflow_dispatch),
+  # never on push/PR, since it needs a funded wallet's private key as a repo
+  # secret. Add AOR_TEST_PRIVATE_KEY / AOR_TEST_PAYTO under repo Settings ->
+  # Secrets and variables -> Actions to enable; without them this job fails
+  # fast with a clear error instead of silently skipping, so a stale/misspelled
+  # secret name doesn't quietly stop verifying anything.
+  sepolia:
+    name: Live Base Sepolia test (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Require secrets are configured
+        run: |
+          if [ -z "${{ secrets.AOR_TEST_PRIVATE_KEY }}" ] || [ -z "${{ secrets.AOR_TEST_PAYTO }}" ]; then
+            echo "::error::AOR_TEST_PRIVATE_KEY and/or AOR_TEST_PAYTO repo secrets are not set — see test/e2e/sepolia_test.go for what's required."
+            exit 1
+          fi
+
+      - name: Live Sepolia payment test
+        env:
+          TEST_SEPOLIA: "1"
+          AOR_TEST_PRIVATE_KEY: ${{ secrets.AOR_TEST_PRIVATE_KEY }}
+          AOR_TEST_PAYTO: ${{ secrets.AOR_TEST_PAYTO }}
+        run: go test ./test/e2e/... -run TestSepolia -v -timeout=120s
 
   lint:
     name: staticcheck

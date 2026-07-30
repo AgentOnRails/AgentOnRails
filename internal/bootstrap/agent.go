@@ -1,0 +1,142 @@
+// Package bootstrap provides a non-interactive way to stand up a fundable
+// x402 agent: generate (or reuse) a burner wallet key and write its agent
+// config, without going through the interactive `aor agents create` /
+// `aor credentials set-wallet` wizards.
+//
+// This is the same wallet-generation and config-writing logic
+// scripts/demo already proved end to end against Base Sepolia — extracted
+// here so other non-interactive entry points (scripts/hermes-quickstart,
+// and scripts/demo itself) can reuse it instead of each keeping their own
+// copy.
+package bootstrap
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/ethereum/go-ethereum/common"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/agentOnRails/agent-on-rails/config"
+	"github.com/agentOnRails/agent-on-rails/vault"
+)
+
+// AgentOptions configures the agent config CreateFundable writes.
+type AgentOptions struct {
+	AgentID       string
+	ProxyPort     int
+	Network       string // CAIP-2, e.g. BaseSepoliaNetwork
+	DailyLimitUSD string
+	PerCallMaxUSD string
+	// PassphraseFile optionally overrides the filename (relative to aorDir)
+	// used to persist the wallet passphrase. Defaults to
+	// "<AgentID>-passphrase". Callers migrating from an already-established
+	// naming convention (like scripts/demo's legacy "demo-passphrase") should
+	// set this explicitly so an existing, possibly-already-funded wallet
+	// keeps being reused instead of silently generating an orphaned new one.
+	PassphraseFile string
+}
+
+// CreateFundable ensures a vault key and an x402 agent YAML config exist
+// for opts.AgentID under aorDir (typically ~/.aor). It reuses a previous
+// run's key and passphrase if one is already stored — so re-running a
+// script built on this doesn't require re-claiming a testnet faucet —
+// otherwise it generates a fresh burner key.
+//
+// aorDir must already contain aor.yaml (i.e. `aor init` must have already
+// run) — CreateFundable reads it to find the configured vault directory,
+// the same dependency scripts/demo already had.
+//
+// It does not fund the wallet or start any process; pair it with
+// WaitForBaseSepoliaUSDC for the funding half.
+func CreateFundable(aorDir string, opts AgentOptions) (address common.Address, passphrase string, err error) {
+	global, err := config.LoadGlobal(filepath.Join(aorDir, "aor.yaml"))
+	if err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: load config: %w", err)
+	}
+	v, err := vault.New(config.ExpandHomePath(global.Daemon.VaultDir))
+	if err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: open vault: %w", err)
+	}
+
+	passphraseFile := opts.PassphraseFile
+	if passphraseFile == "" {
+		passphraseFile = opts.AgentID + "-passphrase"
+	}
+	passphrasePath := filepath.Join(aorDir, passphraseFile)
+	address, passphrase, err = loadOrCreateWallet(v, opts.AgentID, passphrasePath)
+	if err != nil {
+		return common.Address{}, "", err
+	}
+
+	agentPath := filepath.Join(aorDir, "agents", opts.AgentID+".yaml")
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0700); err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: create agents dir: %w", err)
+	}
+	if err := os.WriteFile(agentPath, []byte(agentYAML(address, opts)), 0600); err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: write agent config: %w", err)
+	}
+
+	return address, passphrase, nil
+}
+
+// loadOrCreateWallet reuses agentID's stored key if one already exists in
+// the vault and its passphrase file is readable, otherwise generates a
+// fresh burner key and stores both.
+func loadOrCreateWallet(v *vault.Vault, agentID, passphrasePath string) (common.Address, string, error) {
+	if v.HasKey(agentID) {
+		if passBytes, err := os.ReadFile(passphrasePath); err == nil {
+			passphrase := string(passBytes)
+			if keyBytes, err := v.LoadKey(agentID, passphrase); err == nil {
+				key, err := ethcrypto.ToECDSA(keyBytes)
+				if err != nil {
+					return common.Address{}, "", fmt.Errorf("bootstrap: decode stored key: %w", err)
+				}
+				return ethcrypto.PubkeyToAddress(key.PublicKey), passphrase, nil
+			}
+		}
+	}
+
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: generate wallet: %w", err)
+	}
+	passBytes := make([]byte, 32)
+	if _, err := rand.Read(passBytes); err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: generate passphrase: %w", err)
+	}
+	passphrase := hex.EncodeToString(passBytes)
+
+	if err := v.StoreKey(agentID, passphrase, ethcrypto.FromECDSA(key)); err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: store wallet: %w", err)
+	}
+	if err := os.WriteFile(passphrasePath, []byte(passphrase), 0600); err != nil {
+		return common.Address{}, "", fmt.Errorf("bootstrap: save passphrase: %w", err)
+	}
+	return ethcrypto.PubkeyToAddress(key.PublicKey), passphrase, nil
+}
+
+func agentYAML(addr common.Address, opts AgentOptions) string {
+	return fmt.Sprintf(`# Generated by AgentOnRails' non-interactive bootstrap helper — safe to delete.
+agent_id: %q
+proxy_port: %d
+
+rails:
+  x402:
+    enabled: true
+    wallet_address: %q
+    preferred_chain: %q
+    daily_limit_usd:  %q
+    per_call_max_usd: %q
+    endpoint_mode: "open"
+    allowed_networks:
+      - %q
+    velocity:
+      max_per_minute: 30
+      max_per_hour:   200
+      cooldown_seconds: 60
+`, opts.AgentID, opts.ProxyPort, addr.Hex(), opts.Network, opts.DailyLimitUSD, opts.PerCallMaxUSD, opts.Network)
+}
