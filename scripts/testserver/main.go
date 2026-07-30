@@ -37,7 +37,8 @@ type paymentRequirement struct {
 	Extra             map[string]any `json:"extra,omitempty"`
 }
 
-// knownAssets maps CAIP-2 chain IDs to USDC contract addresses.
+// knownAssets maps CAIP-2 chain IDs to their USDC token address — the
+// verifyingContract for EVM's eip155 chains, the SPL mint for Solana.
 var knownAssets = map[string]string{
 	"eip155:1":     "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
 	"eip155:8453":  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -45,6 +46,9 @@ var knownAssets = map[string]string{
 	"eip155:42161": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
 	"eip155:137":   "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
 	"eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+
+	"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+	"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
 }
 
 func main() {

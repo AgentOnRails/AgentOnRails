@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
@@ -35,17 +36,25 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"go.uber.org/zap"
 
 	"github.com/agentOnRails/agent-on-rails/rail"
+
+	"github.com/agentOnRails/agent-on-rails/internal/rail/x402/chainsign"
+	"github.com/agentOnRails/agent-on-rails/internal/rail/x402/chainsign/eip155"
+	// Blank-imported: nothing in this package calls the solana package by
+	// name (signPayment reaches it only through chainsign.Get's namespace
+	// lookup, by design — that's the whole point of the registry), so this
+	// import exists purely for its init() side effect, registering "solana"
+	// the same way chainsign/eip155's Signer registers itself. Without
+	// this, a preferred_chain: solana:... agent would fail at signing time
+	// with "no signer registered", not at startup.
+	_ "github.com/agentOnRails/agent-on-rails/internal/rail/x402/chainsign/solana"
 )
 
 // ─── Protocol constants ────────────────────────────────────────────────────────
@@ -69,12 +78,6 @@ const (
 	// x402 protocol versions.
 	x402Version   = 2 // default targeted by this rail
 	x402VersionV1 = 1
-
-	// EIP-3009 transferWithAuthorization type string used in EIP-712 domain.
-	eip3009TypeString = "TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
-
-	// EIP-712 domain type string for USDC on EVM chains.
-	eip712DomainTypeString = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
 
 	// Facilitator endpoints.
 	FacilitatorCDP     = "https://api.cdp.coinbase.com/platform/v2/x402" // enterprise CDP endpoint
@@ -121,9 +124,14 @@ var KnownNetworks = map[string]NetworkInfo{
 	"eip155:84532": {ChainID: 84532, Name: "Base Sepolia", USDCAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", RPCURL: "https://sepolia.base.org"},
 	"eip155:80001": {ChainID: 80001, Name: "Polygon Mumbai", USDCAddress: "0x9999f7Fea5938fD3b1E26A12c3f2fb024e194f97"},
 
-	// Solana (not EVM — handled by separate SVM signer, included for allowlist validation)
-	"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {ChainID: 0, Name: "Solana Mainnet"},
-	"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {ChainID: 0, Name: "Solana Devnet"},
+	// Solana — not EVM, signed via chainsign/solana (an ed25519/SPL signer,
+	// not the ECDSA/EIP-712 path every entry above uses). RPCURL here is
+	// load-bearing for Solana specifically (not just the "upto" preflight
+	// hint it is for EVM): chainsign/solana needs a live RPC read for the
+	// latest blockhash before it can sign at all, since Solana transactions
+	// (unlike EIP-3009's gasless authorizations) embed one directly.
+	"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {ChainID: 0, Name: "Solana Mainnet", USDCAddress: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", RPCURL: "https://api.mainnet-beta.solana.com"},
+	"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {ChainID: 0, Name: "Solana Devnet", USDCAddress: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", RPCURL: "https://api.devnet.solana.com"},
 }
 
 // NetworkInfo holds chain metadata used during policy validation and signing.
@@ -229,21 +237,15 @@ type PaymentPayload struct {
 	Extensions  map[string]any     `json:"extensions,omitempty"`
 }
 
-// EIP3009Payload contains the cryptographic proof.
-type EIP3009Payload struct {
-	Signature     string            `json:"signature"`
-	Authorization EIP3009AuthFields `json:"authorization"`
-}
+// EIP3009Payload contains the "exact" scheme's cryptographic proof. A type
+// alias (not a new type) for chainsign/eip155's definition — the actual
+// EIP-3009 signing logic lives there now (see signExact/signPayment below),
+// but this name stays valid at the x402 package level since existing code
+// and tests decode payloads as x402.EIP3009Payload.
+type EIP3009Payload = eip155.EIP3009Payload
 
 // EIP3009AuthFields are the parameters of transferWithAuthorization().
-type EIP3009AuthFields struct {
-	From        string `json:"from"`
-	To          string `json:"to"`
-	Value       string `json:"value"`
-	ValidAfter  string `json:"validAfter"`
-	ValidBefore string `json:"validBefore"`
-	Nonce       string `json:"nonce"`
-}
+type EIP3009AuthFields = eip155.EIP3009AuthFields
 
 // FacilitatorVerifyRequest is the body posted to /verify.
 type FacilitatorVerifyRequest struct {
@@ -311,8 +313,13 @@ type PaymentResponse struct {
 // X402Policy defines the spend controls AgentOnRails enforces on behalf of an agent.
 type X402Policy struct {
 	// Wallet
-	WalletAddress  string
-	PrivateKey     *ecdsa.PrivateKey
+	WalletAddress string
+	PrivateKey    *ecdsa.PrivateKey // set for key_type: ecdsa (default) — EVM chains
+	// Ed25519Key is set for key_type: ed25519 — non-EVM chains (Solana today)
+	// whose chainsign.Signer needs an ed25519 key instead of PrivateKey's
+	// ECDSA one. Never both populated for the same agent: Factory sets
+	// exactly one, based on the agent's configured key_type.
+	Ed25519Key     ed25519.PrivateKey
 	PreferredChain string
 
 	// Facilitator
@@ -486,8 +493,8 @@ var _ rail.Rail = (*X402Rail)(nil)
 // NewX402Rail creates a rail from a policy. The policy must already have a
 // populated PrivateKey (decrypted from wallet.enc by the daemon's vault).
 func NewX402Rail(policy *X402Policy, audit rail.AuditLogger, logger *zap.Logger) (*X402Rail, error) {
-	if policy.PrivateKey == nil {
-		return nil, errors.New("x402 rail: private key is nil — wallet not loaded")
+	if policy.PrivateKey == nil && len(policy.Ed25519Key) == 0 {
+		return nil, errors.New("x402 rail: no wallet key loaded (neither PrivateKey nor Ed25519Key is set)")
 	}
 	if policy.FacilitatorURL == "" {
 		policy.FacilitatorURL = FacilitatorX402Org
@@ -962,7 +969,7 @@ func (r *X402Rail) parsePriceToCents(atomicAmount, asset, network string) (int64
 	if !ok {
 		return 0, "", fmt.Errorf("unknown network %q", network)
 	}
-	if netInfo.USDCAddress != "" && !strings.EqualFold(asset, netInfo.USDCAddress) {
+	if netInfo.USDCAddress != "" && !addressesEqual(network, asset, netInfo.USDCAddress) {
 		return 0, "", fmt.Errorf("unsupported asset %s on %s: only USDC (%s) is supported",
 			asset, network, netInfo.USDCAddress)
 	}
@@ -984,199 +991,105 @@ func (r *X402Rail) parsePriceToCents(atomicAmount, asset, network string) (int64
 
 // ─── EIP-3009 Signing ─────────────────────────────────────────────────────────
 
-// signPayment dispatches to the signer for req's scheme: signExact (EIP-3009,
-// "exact") or signPermit2 (Permit2 witness-transfer, "upto" — see permit2.go).
+// signPayment dispatches to the chainsign.Signer registered for req's
+// network namespace (e.g. "eip155", eventually "solana") and scheme, then
+// wraps the returned inner payload in the protocol-level PaymentPayload
+// envelope — the same envelope shape regardless of chain family or scheme,
+// so this is the one place that builds it (signPermit2, in permit2.go, no
+// longer does — it's kept only as a thin, eip155-specific wrapper a few
+// existing tests call directly).
 func (r *X402Rail) signPayment(
 	ctx context.Context,
 	req *PaymentRequirement,
 	resource *ResourceInfo,
 	rawURL string,
 ) (*PaymentPayload, error) {
-	if req.Scheme == x402SchemeUpto {
-		return r.signPermit2(ctx, req, resource, rawURL)
-	}
-	return r.signExact(ctx, req, resource, rawURL)
-}
-
-func (r *X402Rail) signExact(
-	ctx context.Context,
-	req *PaymentRequirement,
-	resource *ResourceInfo,
-	rawURL string,
-) (*PaymentPayload, error) {
-	network, ok := KnownNetworks[req.Network]
+	namespace := caip2Namespace(req.Network)
+	signer, ok := chainsign.Get(namespace)
 	if !ok {
-		return nil, fmt.Errorf("unknown network %s", req.Network)
+		return nil, fmt.Errorf("no signer registered for chain namespace %q (network %s) — is its package blank-imported?", namespace, req.Network)
 	}
 
-	// Step 1: Random 32-byte nonce
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("nonce generation failed: %w", err)
+	auth := chainsign.PaymentAuth{
+		Network:           req.Network,
+		Asset:             req.Asset,
+		PayTo:             req.PayTo,
+		Amount:            req.Amount,
+		MaxTimeoutSeconds: req.MaxTimeoutSeconds,
+		Extra:             req.Extra,
+		PayloadTTL:        r.policy.PayloadTTL,
+		RPCURL:            KnownNetworks[req.Network].RPCURL,
 	}
-	nonceHex := "0x" + common.Bytes2Hex(nonce)
+	wallet := chainsign.Wallet{
+		Address: r.policy.WalletAddress,
+		ECDSA:   r.policy.PrivateKey,
+		Ed25519: r.policy.Ed25519Key,
+	}
 
-	// Step 2: Time window
-	now := time.Now().UTC()
-	validAfter := now.Add(-5 * time.Second)
-	validBefore := now.Add(r.policy.PayloadTTL)
-	if req.MaxTimeoutSeconds > 0 {
-		serverTTL := time.Duration(req.MaxTimeoutSeconds) * time.Second
-		if serverTTL < r.policy.PayloadTTL {
-			validBefore = now.Add(serverTTL)
+	var rawPayload json.RawMessage
+	var err error
+	if req.Scheme == x402SchemeUpto {
+		if !signer.SupportsUpto() {
+			return nil, fmt.Errorf("chain %q does not support the %q scheme", namespace, x402SchemeUpto)
 		}
+		rawPayload, err = signer.SignUpto(ctx, auth, wallet)
+	} else {
+		rawPayload, err = signer.SignExact(ctx, auth, wallet)
 	}
-
-	// Step 3: EIP-712 domain separator
-	tokenName := "USDC"
-	tokenVersion := "2"
-	if n, ok := req.Extra["name"].(string); ok && n != "" {
-		tokenName = n
-	}
-	if v, ok := req.Extra["version"].(string); ok && v != "" {
-		tokenVersion = v
-	}
-
-	assetAddr := common.HexToAddress(req.Asset)
-	chainID := big.NewInt(network.ChainID)
-	domainSep, err := computeEIP712DomainSeparator(tokenName, tokenVersion, chainID, assetAddr)
 	if err != nil {
-		return nil, fmt.Errorf("domain separator: %w", err)
-	}
-
-	// Step 4: Struct hash
-	fromAddr := common.HexToAddress(r.policy.WalletAddress)
-	toAddr := common.HexToAddress(req.PayTo)
-	value := new(big.Int)
-	value.SetString(req.Amount, 10)
-
-	validAfterInt := big.NewInt(validAfter.Unix())
-	validBeforeInt := big.NewInt(validBefore.Unix())
-	var nonceBytes [32]byte
-	copy(nonceBytes[:], nonce)
-
-	structHash, err := computeTransferWithAuthStructHash(
-		fromAddr, toAddr, value, validAfterInt, validBeforeInt, nonceBytes,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("struct hash: %w", err)
-	}
-
-	// Step 5: Final EIP-712 digest
-	digest := computeEIP712Digest(domainSep, structHash)
-
-	// Step 6: ECDSA sign
-	sig, err := crypto.Sign(digest[:], r.policy.PrivateKey)
-	if err != nil {
-		return nil, fmt.Errorf("ecdsa sign: %w", err)
-	}
-	// go-ethereum returns [R || S || V] where V is 0 or 1; EVM expects 27 or 28.
-	sig[64] += 27
-	sigHex := "0x" + common.Bytes2Hex(sig)
-
-	auth := EIP3009AuthFields{
-		From:        fromAddr.Hex(),
-		To:          toAddr.Hex(),
-		Value:       req.Amount,
-		ValidAfter:  strconv.FormatInt(validAfter.Unix(), 10),
-		ValidBefore: strconv.FormatInt(validBefore.Unix(), 10),
-		Nonce:       nonceHex,
-	}
-
-	var res *ResourceInfo
-	if resource != nil {
-		res = resource
-	} else if rawURL != "" {
-		res = &ResourceInfo{URL: rawURL}
-	}
-
-	rawPayload, err := marshalExactPayload(EIP3009Payload{
-		Signature:     sigHex,
-		Authorization: auth,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal exact payload: %w", err)
+		return nil, err
 	}
 
 	return &PaymentPayload{
 		X402Version: x402Version,
 		Accepted:    *req,
-		Resource:    res,
+		Resource:    resourceOrURL(resource, rawURL),
 		Payload:     rawPayload,
 	}, nil
 }
 
-// computeEIP712DomainSeparator builds the domain separator hash for the token.
-func computeEIP712DomainSeparator(
-	name, version string,
-	chainID *big.Int,
-	contractAddr common.Address,
-) ([32]byte, error) {
-	domainTypeHash := crypto.Keccak256Hash([]byte(eip712DomainTypeString))
-	nameHash := crypto.Keccak256Hash([]byte(name))
-	versionHash := crypto.Keccak256Hash([]byte(version))
-
-	bytes32Type, _ := abi.NewType("bytes32", "", nil)
-	uint256Type, _ := abi.NewType("uint256", "", nil)
-	addressType, _ := abi.NewType("address", "", nil)
-
-	args := abi.Arguments{
-		{Type: bytes32Type},
-		{Type: bytes32Type},
-		{Type: bytes32Type},
-		{Type: uint256Type},
-		{Type: addressType},
+// caip2Namespace returns the namespace portion of a CAIP-2 identifier (the
+// part before the first colon, e.g. "eip155" from "eip155:8453").
+func caip2Namespace(network string) string {
+	if i := strings.IndexByte(network, ':'); i >= 0 {
+		return network[:i]
 	}
-	encoded, err := args.Pack(
-		domainTypeHash,
-		nameHash,
-		versionHash,
-		chainID,
-		contractAddr,
-	)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	return crypto.Keccak256Hash(encoded), nil
+	return network
 }
 
-// computeTransferWithAuthStructHash builds the struct hash of TransferWithAuthorization.
-func computeTransferWithAuthStructHash(
-	from, to common.Address,
-	value, validAfter, validBefore *big.Int,
-	nonce [32]byte,
-) ([32]byte, error) {
-	typeHash := crypto.Keccak256Hash([]byte(eip3009TypeString))
-
-	bytes32Type, _ := abi.NewType("bytes32", "", nil)
-	addressType, _ := abi.NewType("address", "", nil)
-	uint256Type, _ := abi.NewType("uint256", "", nil)
-
-	args := abi.Arguments{
-		{Type: bytes32Type},
-		{Type: addressType},
-		{Type: addressType},
-		{Type: uint256Type},
-		{Type: uint256Type},
-		{Type: uint256Type},
-		{Type: bytes32Type},
+// addressesEqual compares two asset addresses the way their chain family
+// actually treats equality: EVM hex addresses are case-insensitive by
+// convention (mixed case is only ever a checksum, per EIP-55), so eip155
+// compares fold-cased — but every other chain family's addresses (e.g.
+// Solana's base58) are case-sensitive, where folding case would wrongly
+// treat two genuinely different addresses as the same one.
+func addressesEqual(network, a, b string) bool {
+	if caip2Namespace(network) == "eip155" {
+		return strings.EqualFold(a, b)
 	}
-	encoded, err := args.Pack(typeHash, from, to, value, validAfter, validBefore, nonce)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	return crypto.Keccak256Hash(encoded), nil
+	return a == b
 }
 
-// computeEIP712Digest produces keccak256("\x19\x01" || domainSeparator || structHash).
-func computeEIP712Digest(domainSep, structHash [32]byte) [32]byte {
-	prefix := []byte{0x19, 0x01}
-	raw := make([]byte, 0, 2+32+32)
-	raw = append(raw, prefix...)
-	raw = append(raw, domainSep[:]...)
-	raw = append(raw, structHash[:]...)
-	return crypto.Keccak256Hash(raw)
+// resourceOrURL returns resource if set, or a ResourceInfo wrapping rawURL
+// as a fallback — the same "prefer the explicit resource, else the request
+// URL" rule signExact/signPermit2 always applied, now shared by every chain
+// family through signPayment instead of being duplicated per scheme.
+func resourceOrURL(resource *ResourceInfo, rawURL string) *ResourceInfo {
+	if resource != nil {
+		return resource
+	}
+	if rawURL != "" {
+		return &ResourceInfo{URL: rawURL}
+	}
+	return nil
 }
+
+// computeEIP712DomainSeparator is bound to chainsign/eip155's exported
+// implementation so existing white-box tests in this package that call it
+// directly by its historical unexported name keep working unmodified — the
+// actual logic lives in chainsign/eip155 now (see that package's
+// ComputeEIP712DomainSeparator).
+var computeEIP712DomainSeparator = eip155.ComputeEIP712DomainSeparator
 
 // ─── Facilitator pre-verification ─────────────────────────────────────────────
 

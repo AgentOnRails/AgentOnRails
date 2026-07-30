@@ -2,6 +2,7 @@ package x402
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"math"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/gagliardetto/solana-go/base58"
 	"gopkg.in/yaml.v3"
 
 	"github.com/agentOnRails/agent-on-rails/approval"
@@ -17,8 +19,14 @@ import (
 
 // X402RailConfig is the YAML shape for the x402 rail under an agent's rails.x402 block.
 type X402RailConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	WalletAddress  string `yaml:"wallet_address"`
+	Enabled       bool   `yaml:"enabled"`
+	WalletAddress string `yaml:"wallet_address"`
+	// KeyType selects which curve the vault holds this agent's wallet key
+	// as, and therefore which chainsign.Signer family it can pay on: "" or
+	// "ecdsa" (default, EVM chains) or "ed25519" (Solana). Empty defaulting
+	// to "ecdsa" keeps every existing EVM-only agent config working
+	// unchanged — this field didn't exist before Solana support did.
+	KeyType        string `yaml:"key_type"`
 	PreferredChain string `yaml:"preferred_chain"` // CAIP-2 e.g. "eip155:8453"
 
 	PerCallMaxUSD   string `yaml:"per_call_max_usd"` // decimal string e.g. "0.10"
@@ -61,6 +69,14 @@ type VelocityConfig struct {
 
 const DefaultEndpointMode = "open"
 
+// Key types an agent's rails.x402.key_type may declare. KeyTypeECDSA is the
+// default (empty string normalizes to it in ParseRailConfig) so every
+// EVM-only agent config predating Solana support keeps working unchanged.
+const (
+	KeyTypeECDSA   = "ecdsa"
+	KeyTypeEd25519 = "ed25519"
+)
+
 // ParseRailConfig decodes an agent's raw rails.x402 YAML node into a
 // X402RailConfig, applying defaults and validating enum/required fields.
 func ParseRailConfig(raw yaml.Node) (*X402RailConfig, error) {
@@ -77,6 +93,12 @@ func ParseRailConfig(raw yaml.Node) (*X402RailConfig, error) {
 	}
 	if rc.Enabled && rc.WalletAddress == "" {
 		return nil, fmt.Errorf("rails.x402.wallet_address is required")
+	}
+	if rc.KeyType == "" {
+		rc.KeyType = KeyTypeECDSA
+	}
+	if rc.KeyType != KeyTypeECDSA && rc.KeyType != KeyTypeEd25519 {
+		return nil, fmt.Errorf("rails.x402.key_type must be %q or %q, got %q", KeyTypeECDSA, KeyTypeEd25519, rc.KeyType)
 	}
 
 	return &rc, nil
@@ -181,26 +203,49 @@ func Factory(p rail.FactoryParams) (rail.Rail, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("load wallet for %s: %w (run `aor credentials set-wallet`)", p.AgentID, err)
 	}
-	key, err := ethcrypto.ToECDSA(keyBytes)
-	if err != nil {
-		return nil, false, fmt.Errorf("parse wallet key for %s: %w", p.AgentID, err)
-	}
 
-	derivedAddr := ethcrypto.PubkeyToAddress(key.PublicKey).Hex()
-	if !strings.EqualFold(derivedAddr, policy.WalletAddress) {
-		return nil, false, fmt.Errorf(
-			"wallet key mismatch for agent %s: key derives to %s but config wallet_address is %s — update config or re-run `aor credentials set-wallet`",
-			p.AgentID, derivedAddr, policy.WalletAddress,
-		)
+	switch rc.KeyType {
+	case KeyTypeEd25519:
+		// Stored as a 32-byte seed, the same convention the private repo's
+		// identity vault already uses for its own ed25519 keys — not the
+		// full 64-byte seed+pubkey form some ed25519 APIs also accept.
+		if len(keyBytes) != ed25519.SeedSize {
+			return nil, false, fmt.Errorf("wallet key for %s is not a valid ed25519 seed (got %d bytes, want %d)", p.AgentID, len(keyBytes), ed25519.SeedSize)
+		}
+		priv := ed25519.NewKeyFromSeed(keyBytes)
+		pub := priv.Public().(ed25519.PublicKey)
+		var pubArr [32]byte
+		copy(pubArr[:], pub)
+		derivedAddr := base58.Encode32(&pubArr)
+		if derivedAddr != policy.WalletAddress {
+			return nil, false, fmt.Errorf(
+				"wallet key mismatch for agent %s: key derives to %s but config wallet_address is %s — update config or re-run `aor credentials set-wallet`",
+				p.AgentID, derivedAddr, policy.WalletAddress,
+			)
+		}
+		policy.Ed25519Key = priv
+
+	default: // KeyTypeECDSA
+		key, err := ethcrypto.ToECDSA(keyBytes)
+		if err != nil {
+			return nil, false, fmt.Errorf("parse wallet key for %s: %w", p.AgentID, err)
+		}
+		derivedAddr := ethcrypto.PubkeyToAddress(key.PublicKey).Hex()
+		if !strings.EqualFold(derivedAddr, policy.WalletAddress) {
+			return nil, false, fmt.Errorf(
+				"wallet key mismatch for agent %s: key derives to %s but config wallet_address is %s — update config or re-run `aor credentials set-wallet`",
+				p.AgentID, derivedAddr, policy.WalletAddress,
+			)
+		}
+		policy.PrivateKey = key
 	}
-	policy.PrivateKey = key
 
 	// Wire the human-approval gate to the daemon's shared pending-approval
 	// registry, if one was provided — without this, RequireApprovalAboveCents
 	// has nowhere to route a held payment to and always fails closed (see
-	// docs/ROADMAP.md Phase 7). p.Approvals is nil in contexts that don't
-	// wire one up (some tests), in which case behavior is unchanged from
-	// before this field existed: no approver configured.
+	// CHANGELOG.md's [0.1.0] entry). p.Approvals is nil in contexts that
+	// don't wire one up (some tests), in which case behavior is unchanged
+	// from before this field existed: no approver configured.
 	if p.Approvals != nil {
 		agentID := p.AgentID
 		timeout := policy.ApprovalTimeout

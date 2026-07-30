@@ -77,3 +77,54 @@ Write-Host ""
 & (Join-Path $InstallDir "$Binary.exe") version
 Write-Host ""
 Write-Host "Run 'aor init' to create your config directory."
+
+# ── optional: aor-pro (commercial add-ons — identity, privacy, Dispatch) ─────
+#
+# aor-pro has no public binary release yet (unlike aor above, which
+# GoReleaser publishes to this repo's own GitHub releases) — the private
+# repo isn't public, so there's nothing to download by URL. The only way to
+# get an aor-pro binary today is building it from that repo's source, which
+# this step does IF $env:AOR_PRO_SRC_DIR points at a local checkout AND you
+# have a Pro license token to activate. Deliberately not guessed from the
+# current directory: this script's documented usage is a one-liner run from
+# anywhere, so "look for a sibling directory" would be right only by
+# coincidence. Neither set: nothing below runs, and everything above this
+# line behaves exactly as it always has.
+$existingLicense = Join-Path $env:USERPROFILE ".aor-pro\license.key"
+if ($env:AOR_PRO_LICENSE_TOKEN -or (Test-Path $existingLicense)) {
+  $goCmd = Get-Command go -ErrorAction SilentlyContinue
+  if ($env:AOR_PRO_SRC_DIR -and (Test-Path $env:AOR_PRO_SRC_DIR) -and $goCmd) {
+    Write-Host ""
+    Write-Host "Pro license detected — building aor-pro from $env:AOR_PRO_SRC_DIR ..."
+    Push-Location $env:AOR_PRO_SRC_DIR
+    try {
+      & go build -o (Join-Path $InstallDir "aor-pro.exe") ./cmd/aor-pro/
+    } finally {
+      Pop-Location
+    }
+
+    # Both calls below are best-effort: activation can fail on a bad/expired
+    # token and "show" has nothing to report on a fresh vault-dir. A native
+    # exe's non-zero exit doesn't raise a catchable PowerShell error, but it
+    # does set $LASTEXITCODE — reset that explicitly afterward so a caller
+    # scripting against this installer's own exit code doesn't see a false
+    # failure from an intentionally-tolerated one here.
+    if ($env:AOR_PRO_LICENSE_TOKEN -and -not (Test-Path $existingLicense)) {
+      & (Join-Path $InstallDir "aor-pro.exe") license activate $env:AOR_PRO_LICENSE_TOKEN
+      $LASTEXITCODE = 0
+    }
+
+    Write-Host ""
+    & (Join-Path $InstallDir "aor-pro.exe") license show
+    $LASTEXITCODE = 0
+    Write-Host ""
+    Write-Host "aor-pro installed. Run 'aor-pro onboard --agent <id>' for the guided path to a"
+    Write-Host "fully protected agent (wallet, Cargo privacy rail, Track identity), or"
+    Write-Host "'aor-pro doctor' to check an existing setup."
+  } else {
+    Write-Host ""
+    Write-Host "A Pro license was detected, but aor-pro has no public binary download yet."
+    Write-Host "If you have access to the private repo, set `$env:AOR_PRO_SRC_DIR to your"
+    Write-Host "local checkout's path and re-run this installer."
+  }
+}

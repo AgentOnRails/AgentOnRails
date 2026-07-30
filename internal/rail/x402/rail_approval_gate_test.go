@@ -15,7 +15,7 @@ import (
 )
 
 // TestProxyRequest_ApprovalGate_BlocksThenApproves is the end-to-end proof
-// for the gap docs/ROADMAP.md Phase 7 exists to close: before this, a real
+// for the gap CHANGELOG.md's [0.1.0] entry describes: before this, a real
 // request hitting RequireApprovalAboveCents with no ApprovalFunc failed
 // closed permanently — this drives one real HTTP request all the way
 // through ProxyRequest with a real approval.Registry wired in exactly the

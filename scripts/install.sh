@@ -86,3 +86,42 @@ echo ""
 "$INSTALL_DIR/$BINARY" version
 echo ""
 echo "Run 'aor init' to create your config directory."
+
+# ── optional: aor-pro (commercial add-ons — identity, privacy, Dispatch) ──────
+#
+# aor-pro has no public binary release yet (unlike aor above, which
+# GoReleaser publishes to this repo's own GitHub releases) — the private
+# repo isn't public, so there's nothing to download by URL. The only way to
+# get an aor-pro binary today is building it from that repo's source, which
+# this step does IF AOR_PRO_SRC_DIR points at a local checkout AND you have
+# a Pro license token to activate. Deliberately not guessed from the current
+# directory: this script's documented usage is a curl-pipe-sh one-liner run
+# from anywhere, so "look for a sibling directory" would be right only by
+# coincidence. Neither set: nothing below runs, and everything above this
+# line behaves exactly as it always has.
+if [ -n "$AOR_PRO_LICENSE_TOKEN" ] || [ -f "${HOME}/.aor-pro/license.key" ]; then
+  if [ -n "$AOR_PRO_SRC_DIR" ] && [ -d "$AOR_PRO_SRC_DIR" ] && command -v go >/dev/null 2>&1; then
+    echo ""
+    echo "Pro license detected — building aor-pro from $AOR_PRO_SRC_DIR ..."
+    ( cd "$AOR_PRO_SRC_DIR" && go build -o "$INSTALL_DIR/aor-pro" ./cmd/aor-pro/ )
+
+    # Both calls below are best-effort: activation can fail on a bad/expired
+    # token and "show" has nothing to report on a fresh vault-dir, neither of
+    # which should take down the rest of this installer under `set -e`.
+    if [ -n "$AOR_PRO_LICENSE_TOKEN" ] && [ ! -f "${HOME}/.aor-pro/license.key" ]; then
+      "$INSTALL_DIR/aor-pro" license activate "$AOR_PRO_LICENSE_TOKEN" || true
+    fi
+
+    echo ""
+    "$INSTALL_DIR/aor-pro" license show || true
+    echo ""
+    echo "aor-pro installed. Run 'aor-pro onboard --agent <id>' for the guided path to a"
+    echo "fully protected agent (wallet, Cargo privacy rail, Track identity), or"
+    echo "'aor-pro doctor' to check an existing setup."
+  else
+    echo ""
+    echo "A Pro license was detected, but aor-pro has no public binary download yet."
+    echo "If you have access to the private repo, set AOR_PRO_SRC_DIR to your local"
+    echo "checkout's path and re-run this installer."
+  fi
+fi

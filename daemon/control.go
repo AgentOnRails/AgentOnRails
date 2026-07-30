@@ -20,15 +20,16 @@ import (
 	"github.com/agentOnRails/agent-on-rails/config"
 )
 
-// Phase 7 (docs/ROADMAP.md): the daemon was PID-file/signal-controlled
-// only — no running-daemon API of any kind, which is also why x402's
+// Before this file existed, the daemon was PID-file/signal-controlled only —
+// no running-daemon API of any kind, which is also why x402's
 // RequireApprovalAboveCents had nowhere to route a pending decision to and
-// failed closed, permanently, whenever configured. This file is that
-// missing route: a localhost-by-default, bearer-token-authenticated HTTP
-// surface exposing approve/deny for held payments, pause/resume for one
-// agent's proxy server, and a policy reload — all without restarting the
-// daemon process or any other agent. Shared surface: both a future
-// view-only dashboard and a full-control one read/write the same API.
+// failed closed, permanently, whenever configured (see CHANGELOG.md's
+// [0.1.0] entry). This file is that missing route: a localhost-by-default,
+// bearer-token-authenticated HTTP surface exposing approve/deny for held
+// payments, pause/resume for one agent's proxy server, and a policy reload —
+// all without restarting the daemon process or any other agent. Shared
+// surface: both a future view-only dashboard and a full-control one
+// read/write the same API.
 
 const controlTokenByteLen = 32
 

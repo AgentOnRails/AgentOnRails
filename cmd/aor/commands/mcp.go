@@ -135,6 +135,18 @@ not this command.`,
 			return fmt.Errorf("build proxy client: %w", err)
 		}
 
+		// Loud, not just documented in --help: MCP mode's policy enforcement
+		// only covers calls the agent actually makes through request_payment
+		// — any other way the agent has to reach the network (a shell tool,
+		// a browser tool, its own HTTP client) bypasses it entirely, unlike
+		// the transparent HTTP(S) proxy ("aor start"), which sees everything
+		// regardless of how the agent was told to call out. Printed every
+		// startup so this can't be missed the way a --help paragraph can.
+		logger.Warn("MCP mode only enforces policy on calls made through this server's tools " +
+			"(request_payment, etc.) — any other network path the agent has (shell, browser, its " +
+			"own HTTP client) bypasses it entirely. The transparent proxy (`aor start`) covers all " +
+			"outbound traffic regardless of how the agent makes it; this does not.")
+
 		srv := aormcp.New(agentCfg, railCfg, policy, httpClient, proxyAddr, db, logger)
 		return srv.ServeStdio(context.Background())
 	},

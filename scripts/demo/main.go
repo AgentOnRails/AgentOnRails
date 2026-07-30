@@ -134,7 +134,7 @@ func run() error {
 	if dispatch, err := exec.LookPath("aor-pro"); err == nil {
 		fmt.Printf("  %s dispatch serve --audit-db %s\n", dispatch, config.ExpandHomePath(global.Daemon.AuditDB))
 	} else {
-		fmt.Println("  (Dispatch — the audit dashboard — is part of the commercial aor-pro; see docs/ROADMAP.md)")
+		fmt.Println("  (Dispatch — the audit dashboard — is part of the commercial aor-pro; see the \"Licensing & Commercial Offerings\" section of README.md)")
 	}
 	fmt.Println("\nCtrl+C to stop.")
 

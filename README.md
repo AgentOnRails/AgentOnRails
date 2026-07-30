@@ -23,14 +23,31 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
 
 ## Supported networks
 
-| Chain | CAIP-2 | USDC address |
-|-------|--------|--------------|
-| Base | `eip155:8453` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
-| Ethereum Mainnet | `eip155:1` | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` |
-| Optimism | `eip155:10` | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` |
-| Arbitrum One | `eip155:42161` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
-| Polygon | `eip155:137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` |
-| Base Sepolia (testnet) | `eip155:84532` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+Chain support is pluggable (`internal/rail/x402/chainsign`) — adding a new
+chain family means registering a signer, not forking the rail. Every chain
+below has a real, tested signer behind it (not just an allowlist entry).
+
+| Chain | CAIP-2 | Asset address | `key_type` |
+|-------|--------|--------------|------------|
+| Base | `eip155:8453` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `ecdsa` (default) |
+| Ethereum Mainnet | `eip155:1` | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | `ecdsa` (default) |
+| Optimism | `eip155:10` | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | `ecdsa` (default) |
+| Arbitrum One | `eip155:42161` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | `ecdsa` (default) |
+| Polygon | `eip155:137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | `ecdsa` (default) |
+| Base Sepolia (testnet) | `eip155:84532` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `ecdsa` (default) |
+| Solana | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | `ed25519` |
+| Solana Devnet (testnet) | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | `ed25519` |
+
+EVM chains use EIP-3009 (`ecdsa` wallets); Solana uses SPL Token
+`TransferChecked` (`ed25519` wallets, base58 addresses). `aor agents create`
+and `aor credentials set-wallet --key-type ed25519` handle the distinction
+for you — see [Create your first agent](#3-create-your-first-agent).
+
+Solana's signing model has one real difference from every EVM chain here:
+EIP-3009 is gasless, but a Solana transaction always needs a fee payer, so a
+Solana-keyed agent's wallet needs a small SOL balance for network fees (and,
+the first time it pays a given recipient, one-time token-account rent) —
+not just USDC.
 
 ---
 
@@ -76,7 +93,6 @@ Creating a new agent configuration.
 
   Agent ID [my-agent]:
   Proxy port [8402]:
-  Wallet address (0x...): 0xYOUR_WALLET
 
   1) Base mainnet      (eip155:8453)  ← recommended
   2) Ethereum mainnet  (eip155:1)
@@ -84,8 +100,11 @@ Creating a new agent configuration.
   4) Arbitrum One      (eip155:42161)
   5) Polygon           (eip155:137)
   6) Base Sepolia      (eip155:84532)  ← testnet
+  7) Solana mainnet    (solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp)
+  8) Solana devnet     (solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1)  ← testnet
 
   Preferred chain [1]: 1
+  Wallet address (0x...): 0xYOUR_WALLET
   Daily spend limit (USD, 0 = unlimited) [5.00]:
   Per-call maximum  (USD, 0 = unlimited) [0.10]:
   Endpoint mode [open]:
@@ -118,6 +137,8 @@ export HTTPS_PROXY=http://localhost:8402
 ```
 
 That's it. Any HTTP client that respects standard proxy env vars works — Python `httpx`/`requests`, Node `fetch`, `curl`, LangChain, CrewAI, etc. No SDK changes required.
+
+**Verified, not just claimed:** `test/e2e/client_compat_test.go` drives one real payment through the running proxy from curl, Python (stdlib `urllib`), and Node (stdlib `http`) — not just Go's own `net/http.Client`, which every other test in this repo uses — and confirms budget/policy enforcement holds identically for all of them, including a test proving one client exhausting the budget blocks a *different* client's next request. Any client speaking the same plain-HTTP proxy protocol (explicit proxy CONNECT / absolute-form requests) — which includes `requests`/`httpx` and most agent frameworks built on them — gets the same guarantee.
 
 Or skip the manual exports and let `aor run` set them for just one process:
 

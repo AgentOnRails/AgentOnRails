@@ -2,8 +2,8 @@
 // registry: any rail whose policy requires human sign-off above a spend
 // threshold (x402's require_approval_above_usd today) registers a request
 // here and blocks until it's approved, denied, or times out, instead of
-// failing closed with no path to ever succeed. See docs/ROADMAP.md Phase 7
-// for why this exists: RequireApprovalAboveCents was fully parsed and
+// failing closed with no path to ever succeed. See CHANGELOG.md's [0.1.0]
+// entry for why this exists: RequireApprovalAboveCents was fully parsed and
 // enforced but had nowhere to route a pending decision to, so it failed
 // closed permanently whenever configured — this is that missing route.
 //
