@@ -46,6 +46,7 @@ type Daemon struct {
 	servers       map[string]*http.Server
 	controlServer *http.Server
 	controlToken  string
+	shutdownFn    context.CancelFunc // cancels Start's ctx; set once Start begins, used by the control API's /control/shutdown
 	mu            sync.Mutex
 }
 
@@ -139,6 +140,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// Wrap context so the budget-persistence goroutine exits cleanly on shutdown.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Exposed so the control API's /control/shutdown can trigger the same
+	// graceful path below (servers drained, budgets persisted, PID file
+	// removed) over HTTP instead of an OS signal — the only shutdown
+	// mechanism that works uniformly across platforms (Windows' Process.Signal
+	// doesn't support SIGTERM at all; see cmd/aor/commands/start.go's stopCmd).
+	d.mu.Lock()
+	d.shutdownFn = cancel
+	d.mu.Unlock()
 
 	pidPath := config.ExpandHomePath(d.cfg.Daemon.PIDFile)
 	if err := writePID(pidPath); err != nil {

@@ -19,7 +19,7 @@ AI agent → http://localhost:8402 → [AgentOnRails] → https://paid-api.examp
 - **Spend guardrails** — per-agent daily/weekly/monthly budgets, per-call maximums, velocity limits, endpoint allowlists/blocklists
 - **Human approval gate** — hold any payment above a configurable amount (`require_approval_above_usd`) for a yes/no from a local control API instead of paying it automatically
 - **Encrypted wallet vault** — private keys never touch disk unencrypted; AES-256-GCM + scrypt
-- **Audit log** — every transaction written to SQLite; queryable with `aor audit` and `aor spend`
+- **Audit log** — every transaction written to SQLite as a tamper-evident hash chain; queryable with `aor audit` and `aor spend`, integrity-checked with `aor audit verify`
 
 ## Supported networks
 
@@ -68,8 +68,13 @@ brew install aor
 # macOS / Linux (one-liner)
 curl -sf https://raw.githubusercontent.com/agentOnRails/agent-on-rails/main/scripts/install.sh | sh
 
-# From source
+# From source (any OS with Go installed)
 go install github.com/agentOnRails/agent-on-rails/cmd/aor@latest
+```
+
+```powershell
+# Windows (PowerShell)
+iwr https://raw.githubusercontent.com/agentOnRails/agent-on-rails/main/scripts/install.ps1 -useb | iex
 ```
 
 ### 2. Init
@@ -415,7 +420,10 @@ aor start [--config ~/.aor/aor.yaml] [--passphrase ...]
     Start the proxy daemon. Passphrase can also be set via AOR_PASSPHRASE env var.
 
 aor stop
-    Gracefully stop the running daemon (sends SIGTERM).
+    Gracefully stop the running daemon — via the control API's
+    /control/shutdown by default (works on every OS), falling back to
+    SIGTERM if the control API is disabled or unreachable (Unix only;
+    Windows does not support sending another process SIGTERM).
 
 aor run --agent <agent-id> -- <command> [args...]
     Run a command with that agent's proxy (and CA, if https_intercept is on)
@@ -435,6 +443,12 @@ aor spend [agent-id]
 
 aor audit [agent-id] [--since 24h] [--limit 50]
     Show the transaction audit log.
+
+aor audit verify
+    Check the audit log's hash chain for tampering — every row hashes in
+    the one before it, so editing or deleting a row breaks the stored hash
+    of every row written after it. Exits non-zero on the first break found,
+    so it's safe to use as a scripted integrity check.
 
 aor credentials set-wallet <agent-id>
     Encrypt and store a wallet private key in the vault.
@@ -479,6 +493,13 @@ POST /control/agents/{id}/policy
     Reload one agent's rails.* config from a new YAML body (the same shape as
     that agent's own config file's "rails:" key) without restarting the daemon —
     useful for bumping a spend limit without downtime for every other agent.
+
+POST /control/shutdown
+    Gracefully stop the daemon (drain proxy + control servers, persist
+    budgets, close the audit DB, remove the PID file) — the same shutdown
+    SIGINT/SIGTERM triggers, just reachable over HTTP. This is what `aor stop`
+    calls by default, since it works on every OS `aor start` runs on (Windows
+    does not support sending a process SIGTERM at all).
 ```
 
 Example: hold anything over $50 for approval, then approve it from another shell.
@@ -514,7 +535,7 @@ Set `daemon.control_disabled: true` to turn this off entirely.
 | `daemon.control_disabled` | `false` | Set `true` to not start the control API at all |
 | `alerts.slack_webhook_url` | — | Slack incoming webhook (optional) |
 | `alerts.budget_threshold_pct` | `80` | Alert when spend reaches this % of limit |
-| `facilitators.x402` | Coinbase CDP | x402 facilitator URL |
+| `facilitators.x402` | `https://x402.org/facilitator` | x402 facilitator URL (Coinbase-operated public facilitator; the enterprise CDP endpoint is opt-in) |
 
 ### `~/.aor/agents/<name>.yaml` (per-agent)
 

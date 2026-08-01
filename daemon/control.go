@@ -137,6 +137,7 @@ func (d *Daemon) controlHandler() http.Handler {
 	mux.Handle("POST /control/agents/{id}/pause", d.requireControlAuth(http.HandlerFunc(d.handlePauseAgent)))
 	mux.Handle("POST /control/agents/{id}/resume", d.requireControlAuth(http.HandlerFunc(d.handleResumeAgent)))
 	mux.Handle("POST /control/agents/{id}/policy", d.requireControlAuth(http.HandlerFunc(d.handleReloadPolicy)))
+	mux.Handle("POST /control/shutdown", d.requireControlAuth(http.HandlerFunc(d.handleShutdown)))
 	return mux
 }
 
@@ -205,6 +206,24 @@ func (d *Daemon) handleReloadPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleShutdown triggers the same graceful shutdown Start() runs on
+// SIGINT/SIGTERM (drain proxy + control servers, persist budgets, close the
+// audit DB, remove the PID file) but over HTTP — the cross-platform-safe
+// path `aor stop` uses, since Windows' Process.Signal doesn't support
+// SIGTERM at all. The response is written before cancelling so the caller
+// reliably sees the 200 rather than racing the server's own shutdown.
+func (d *Daemon) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	d.mu.Lock()
+	cancel := d.shutdownFn
+	d.mu.Unlock()
+	if cancel == nil {
+		http.Error(w, "daemon: shutdown not available (daemon not fully started yet)", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "shutting down"})
+	go cancel()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

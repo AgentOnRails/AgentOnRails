@@ -171,16 +171,19 @@ var agentsCreateCmd = &cobra.Command{
 		// Offer to store wallet key now
 		storeNow := prompt(in, "Store encrypted wallet key now?", "Y")
 		if strings.HasPrefix(strings.ToLower(storeNow), "y") {
-			// Delegate to the existing set-wallet logic by running it inline,
-			// with its --key-type flag set to match the chosen chain (the
-			// same "set the flag-bound package var, then call RunE directly"
-			// pattern the private repo's onboard command uses to reuse
-			// cargo/identity setup's own RunE functions).
+			// Delegate to set-wallet's own logic (runSetWallet), passing the
+			// SAME bufio.Reader `in` already used for every prompt above —
+			// not a fresh one. A fresh bufio.Reader/Scanner over os.Stdin here
+			// would silently lose piped input: the wizard's own reader may
+			// already have buffered the private-key/passphrase lines that
+			// follow while satisfying an earlier prompt, so a second reader
+			// constructed from scratch would see EOF instead. Also set
+			// --key-type to match the chosen chain first.
 			setWalletKeyType = chain.keyType
 			if setWalletKeyType == "" {
 				setWalletKeyType = x402.KeyTypeECDSA
 			}
-			if err := setWalletCmd.RunE(setWalletCmd, []string{agentID}); err != nil {
+			if err := runSetWallet(in, agentID); err != nil {
 				fmt.Fprintf(os.Stderr, "\nWarning: wallet setup failed: %v\n", err)
 				fmt.Fprintf(os.Stderr, "Run `aor credentials set-wallet %s` to retry.\n", agentID)
 			}

@@ -4,6 +4,30 @@ All notable changes to AgentOnRails are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Control API: `POST /control/shutdown` gracefully stops the daemon (same
+  drain/persist/close sequence as SIGINT/SIGTERM) over HTTP. `aor stop` now
+  calls this by default and falls back to sending SIGTERM only if the
+  control API is disabled or unreachable — SIGTERM alone never worked on
+  Windows (`Process.Signal` doesn't support it there), so this is the
+  first version of `aor stop` that can gracefully stop the daemon on
+  Windows at all.
+
+### Fixed
+- `aor credentials set-wallet` (including the inline prompt inside
+  `aor agents create`) silently stored wallets with an **empty passphrase**
+  when stdin was piped/non-interactive (any scripted or automated setup,
+  not a live terminal): each secret prompt opened its own fresh
+  `bufio.Scanner(os.Stdin)`, and only the first one actually saw the piped
+  data — every later prompt read as `""` and the passphrase/confirmation
+  compared equal trivially. The command reported success, but the vault
+  could never be unlocked with the real passphrase afterward (`aor start`
+  also refuses an empty passphrase outright, so the wallet was
+  permanently stuck). All secret prompts in one invocation now share a
+  single buffered reader, and an empty passphrase is rejected explicitly.
+
 ## [0.2.0] - 2026-07-30
 
 ### Added
