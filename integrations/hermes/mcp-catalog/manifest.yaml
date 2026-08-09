@@ -1,0 +1,80 @@
+# Draft Nous-approved MCP catalog entry for hermes-agent's optional-mcps/.
+# Not yet submitted. To submit: copy this file to
+# optional-mcps/agentonrails/manifest.yaml in a hermes-agent checkout and
+# open a PR — presence in that directory is what "approved" means there.
+manifest_version: 1
+
+name: agentonrails
+description: Pay for paid APIs automatically over the x402 rail, under a budget you set — policy-enforced spend limits and a full audit trail, all local.
+source: https://github.com/agentOnRails/agent-on-rails
+
+# aor is a local Go binary the user installs themselves (brew/curl/go
+# install/build from source) — this manifest doesn't clone or bootstrap
+# anything, it just points at the already-installed binary. `aor mcp` is a
+# pure client of the already-running `aor start` daemon for --agent: it
+# never decrypts the wallet key or tracks budget itself, so request_payment
+# fails with a clear connection error if the daemon isn't running yet.
+#
+# --agent is hardcoded to "hermes-agent" by convention: that's the agent id
+# `scripts/hermes-quickstart` creates in the upstream repo (see
+# post_install). Anyone installing this manually with a different agent id
+# should edit args below to match.
+transport:
+  type: stdio
+  command: aor
+  args: ["mcp", "--agent", "hermes-agent"]
+
+# No credentials needed here: the aor start daemon is the only process
+# that ever decrypts the wallet key. aor mcp never sees a passphrase.
+auth:
+  type: none
+
+# Tool selection at install time:
+# request_payment is the one tool that spends real (or testnet) funds, but
+# it's already gated by aor's own policy engine on the daemon side — daily/
+# weekly/monthly limits, a per-call max, velocity limits, endpoint allow/
+# block — not by anything Hermes enforces. It's enabled by default because
+# a payment rail with request_payment disabled isn't the product; flagged
+# here explicitly the way n8n's mutating tools are, so it's a conscious
+# choice at install time, not a surprise later.
+tools:
+  default_enabled:
+    - request_payment
+    - get_balance
+    - get_spend_history
+    - get_policy
+
+post_install: |
+  Install aor first if you haven't:
+
+    macOS/Linux: curl -sf https://raw.githubusercontent.com/agentOnRails/agent-on-rails/main/scripts/install.sh | sh
+    Windows:     iwr https://raw.githubusercontent.com/agentOnRails/agent-on-rails/main/scripts/install.ps1 -useb | iex
+    From source: go install github.com/agentOnRails/agent-on-rails/cmd/aor@latest
+
+  Then get a funded "hermes-agent" running end to end in about two minutes:
+
+    go run ./scripts/hermes-quickstart
+
+  This runs `aor init` (enabling HTTPS interception so paid https:// URLs
+  work through this tool), creates the hermes-agent wallet/config, waits
+  for Base Sepolia testnet USDC from the Circle faucet (the one manual
+  step), and starts `aor start` in the background before handing off. Once
+  it's funded, start a new Hermes session so the agentonrails tools load.
+
+  Before this manifest is merged, add the server by hand the same way
+  `hermes mcp install` would once it's approved:
+
+    hermes mcp add agentonrails --command aor --args mcp --agent hermes-agent
+
+  request_payment only pays within hermes-agent's own budget — edit
+  ~/.aor/agents/hermes-agent.yaml (daily_limit_usd, per_call_max_usd, etc.)
+  to change it, or run `aor agents create` for a different agent id and
+  update args above to match.
+
+  Scope limit, stated plainly: request_payment only governs calls made
+  through it. An agent with its own separate network access (a shell tool,
+  a browser tool, its own HTTP client) can still make a request without
+  going through this tool, and aor never sees it — no budget check, no
+  audit entry. Only network-level egress lockdown closes that gap; this
+  MCP server can't by itself. Full writeup:
+  https://github.com/agentOnRails/agent-on-rails/blob/main/docs/hermes-integration.md

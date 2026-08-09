@@ -106,6 +106,15 @@ demo specifically:
 3. Call `request_payment` again for an amount over the agent's per-call max — show it get blocked by policy, not silently fail.
 4. Call `get_spend_history` — show both the successful and blocked attempts recorded.
 
+A first recording of exactly this sequence — registered via `hermes mcp
+add`, a real blocked call ($0.30 against a $0.25 per-call max), a real
+$0.01 payment settled on Base Sepolia (verified independently against the
+chain, not just aor's own log), then `get_spend_history` showing both — is
+at `integrations/hermes/demo.gif`. It's a stylized terminal render of the
+genuine transcript (real Chrome-based screen recording wasn't available
+when this was captured), not a mockup: every command, response, and the
+transaction hash in it are real.
+
 ## Submitting for Nous review
 
 The integration should go in as a reviewed, opt-in capability — not
