@@ -7,6 +7,18 @@ Versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Arc Testnet (`eip155:5042002`, Circle's USDC-native L1) added to
+  `KnownNetworks`, registered with its real native USDC address. Real x402
+  payments on Arc go through Circle Gateway's Nanopayments feature, which
+  signs the `exact` scheme against a different EIP-712 domain (its
+  `GatewayWalletBatched` ledger contract) than the asset being priced —
+  `chainsign/eip155.SignExact` now honors an `extra.verifyingContract`
+  override for this, falling back to the asset address (today's behavior)
+  when it's absent, so no other chain is affected. Verified against
+  Circle's published Gateway contract addresses and the
+  `@circle-fin/x402-batching` client SDK source, but not yet against a live
+  testnet payment. Arc Mainnet isn't listed — it launches 2026-09-16 and
+  has no published USDC/Gateway address yet.
 - Control API: `POST /control/shutdown` gracefully stops the daemon (same
   drain/persist/close sequence as SIGINT/SIGTERM) over HTTP. `aor stop` now
   calls this by default and falls back to sending SIGTERM only if the

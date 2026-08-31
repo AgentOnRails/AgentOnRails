@@ -124,6 +124,16 @@ var KnownNetworks = map[string]NetworkInfo{
 	"eip155:84532": {ChainID: 84532, Name: "Base Sepolia", USDCAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", RPCURL: "https://sepolia.base.org"},
 	"eip155:80001": {ChainID: 80001, Name: "Polygon Mumbai", USDCAddress: "0x9999f7Fea5938fD3b1E26A12c3f2fb024e194f97"},
 
+	// Arc Testnet — Circle's USDC-native L1. USDCAddress is the real native
+	// USDC system contract (a fixed system address, not a per-chain
+	// deployment — see docs.arc.io/arc/references/contract-addresses).
+	// Circle Gateway Nanopayments signs "exact" payments against a
+	// *different* contract (GatewayWalletBatched) carried in the
+	// challenge's extra.verifyingContract — see the override in
+	// chainsign/eip155.SignExact. Arc Mainnet isn't listed: no published
+	// USDC/Gateway address exists yet (mainnet launches 2026-09-16).
+	"eip155:5042002": {ChainID: 5042002, Name: "Arc Testnet", USDCAddress: "0x3600000000000000000000000000000000000000", RPCURL: "https://rpc.testnet.arc.io"},
+
 	// Solana — not EVM, signed via chainsign/solana (an ed25519/SPL signer,
 	// not the ECDSA/EIP-712 path every entry above uses). RPCURL here is
 	// load-bearing for Solana specifically (not just the "upto" preflight

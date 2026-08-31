@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"go.uber.org/zap"
@@ -342,6 +344,170 @@ func TestComputeEIP712DomainSeparator_DiffersByChain(t *testing.T) {
 	h2, _ := computeEIP712DomainSeparator("USDC", "2", big.NewInt(8453), addr)
 	if h1 == h2 {
 		t.Error("domain separator should differ by chain ID")
+	}
+}
+
+// eip3009StructHash reproduces chainsign/eip155's unexported
+// computeTransferWithAuthStructHash so tests here can independently verify
+// which EIP-712 domain a returned signature actually recovers under. The
+// type string is EIP-3009's own spec text, not something specific to this
+// codebase, so duplicating it in a test is not fragile.
+func eip3009StructHash(t *testing.T, from, to common.Address, value, validAfter, validBefore *big.Int, nonce [32]byte) [32]byte {
+	t.Helper()
+	const eip3009TypeString = "TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
+	typeHash := ethcrypto.Keccak256Hash([]byte(eip3009TypeString))
+
+	bytes32Type, _ := abi.NewType("bytes32", "", nil)
+	addressType, _ := abi.NewType("address", "", nil)
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+	args := abi.Arguments{
+		{Type: bytes32Type}, {Type: addressType}, {Type: addressType},
+		{Type: uint256Type}, {Type: uint256Type}, {Type: uint256Type}, {Type: bytes32Type},
+	}
+	encoded, err := args.Pack(typeHash, from, to, value, validAfter, validBefore, nonce)
+	if err != nil {
+		t.Fatalf("pack struct hash args: %v", err)
+	}
+	return ethcrypto.Keccak256Hash(encoded)
+}
+
+// eip712Digest reproduces chainsign/eip155's unexported computeEIP712Digest.
+func eip712Digest(domainSep, structHash [32]byte) [32]byte {
+	raw := make([]byte, 0, 2+32+32)
+	raw = append(raw, 0x19, 0x01)
+	raw = append(raw, domainSep[:]...)
+	raw = append(raw, structHash[:]...)
+	return ethcrypto.Keccak256Hash(raw)
+}
+
+// recoversUnderDomain reports whether sigHex (the "0x"-prefixed 65-byte
+// EIP3009Payload signature) was produced over the digest built from
+// domainSep and the authorization fields.
+func recoversUnderDomain(t *testing.T, sigHex string, domainSep [32]byte, auth EIP3009AuthFields, wantSigner common.Address) bool {
+	t.Helper()
+	sig := common.FromHex(sigHex)
+	if len(sig) != 65 {
+		t.Fatalf("signature length = %d, want 65", len(sig))
+	}
+	// crypto.SigToPub expects V in {0,1}; SignExact stores it as {27,28}.
+	sigForRecover := slices.Clone(sig)
+	sigForRecover[64] -= 27
+
+	value, _ := new(big.Int).SetString(auth.Value, 10)
+	validAfter, _ := new(big.Int).SetString(auth.ValidAfter, 10)
+	validBefore, _ := new(big.Int).SetString(auth.ValidBefore, 10)
+	var nonce [32]byte
+	copy(nonce[:], common.FromHex(auth.Nonce))
+
+	structHash := eip3009StructHash(t,
+		common.HexToAddress(auth.From), common.HexToAddress(auth.To),
+		value, validAfter, validBefore, nonce)
+	digest := eip712Digest(domainSep, structHash)
+
+	pubKey, err := ethcrypto.SigToPub(digest[:], sigForRecover)
+	if err != nil {
+		return false
+	}
+	return ethcrypto.PubkeyToAddress(*pubKey) == wantSigner
+}
+
+func TestSignPayment_VerifyingContractOverride(t *testing.T) {
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ethcrypto.PubkeyToAddress(key.PublicKey)
+
+	const (
+		arcUSDC         = "0x3600000000000000000000000000000000000000"
+		gatewayContract = "0x0077777d7EBA4688BDeF3E311b846F25870A19B9"
+	)
+
+	rail := &X402Rail{policy: &X402Policy{
+		PrivateKey:    key,
+		WalletAddress: addr.Hex(),
+		PayloadTTL:    60 * time.Second,
+		SkipPreVerify: true,
+	}}
+	req := &PaymentRequirement{
+		Network:           "eip155:5042002",
+		Amount:            "10000",
+		Asset:             arcUSDC,
+		PayTo:             "0x1234567890123456789012345678901234567890",
+		MaxTimeoutSeconds: 60,
+		Extra: map[string]any{
+			"name":              "GatewayWalletBatched",
+			"version":           "1",
+			"verifyingContract": gatewayContract,
+		},
+	}
+
+	payload, err := rail.signPayment(context.Background(), req, nil, "https://api.example.com/resource")
+	if err != nil {
+		t.Fatalf("signPayment: %v", err)
+	}
+	var eip3009 EIP3009Payload
+	if err := json.Unmarshal(payload.Payload, &eip3009); err != nil {
+		t.Fatalf("unmarshal exact payload: %v", err)
+	}
+
+	chainID := big.NewInt(5042002)
+	gatewayDomain, err := computeEIP712DomainSeparator("GatewayWalletBatched", "1", chainID, common.HexToAddress(gatewayContract))
+	if err != nil {
+		t.Fatalf("gateway domain separator: %v", err)
+	}
+	assetDomain, err := computeEIP712DomainSeparator("GatewayWalletBatched", "1", chainID, common.HexToAddress(arcUSDC))
+	if err != nil {
+		t.Fatalf("asset domain separator: %v", err)
+	}
+
+	if !recoversUnderDomain(t, eip3009.Signature, gatewayDomain, eip3009.Authorization, addr) {
+		t.Error("signature does not recover under the GatewayWalletBatched/verifyingContract domain — override did not take effect")
+	}
+	if recoversUnderDomain(t, eip3009.Signature, assetDomain, eip3009.Authorization, addr) {
+		t.Error("signature recovers under the asset-address domain — verifyingContract override was ignored")
+	}
+}
+
+func TestSignPayment_NoVerifyingContractOverride_UsesAsset(t *testing.T) {
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ethcrypto.PubkeyToAddress(key.PublicKey)
+
+	const usdcBaseSepolia = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+	rail := &X402Rail{policy: &X402Policy{
+		PrivateKey:    key,
+		WalletAddress: addr.Hex(),
+		PayloadTTL:    60 * time.Second,
+		SkipPreVerify: true,
+	}}
+	req := &PaymentRequirement{
+		Network:           "eip155:84532",
+		Amount:            "10000",
+		Asset:             usdcBaseSepolia,
+		PayTo:             "0x1234567890123456789012345678901234567890",
+		MaxTimeoutSeconds: 60,
+		Extra:             map[string]any{"name": "USDC", "version": "2"},
+	}
+
+	payload, err := rail.signPayment(context.Background(), req, nil, "https://api.example.com/resource")
+	if err != nil {
+		t.Fatalf("signPayment: %v", err)
+	}
+	var eip3009 EIP3009Payload
+	if err := json.Unmarshal(payload.Payload, &eip3009); err != nil {
+		t.Fatalf("unmarshal exact payload: %v", err)
+	}
+
+	assetDomain, err := computeEIP712DomainSeparator("USDC", "2", big.NewInt(84532), common.HexToAddress(usdcBaseSepolia))
+	if err != nil {
+		t.Fatalf("asset domain separator: %v", err)
+	}
+	if !recoversUnderDomain(t, eip3009.Signature, assetDomain, eip3009.Authorization, addr) {
+		t.Error("signature does not recover under the asset domain when no verifyingContract override is present — existing chains must be unaffected")
 	}
 }
 

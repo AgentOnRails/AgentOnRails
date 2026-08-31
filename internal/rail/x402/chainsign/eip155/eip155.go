@@ -198,7 +198,19 @@ func SignExact(ctx context.Context, a chainsign.PaymentAuth, w chainsign.Wallet)
 		tokenVersion = v
 	}
 
+	// The domain's verifyingContract is normally the asset itself, but some
+	// integrations sign "exact" payments against a different contract than
+	// the asset being priced — e.g. Circle Gateway Nanopayments on Arc keeps
+	// `asset` as the real native USDC address (for price/decimals purposes)
+	// while requiring the EIP-3009 signature to verify against its own
+	// GatewayWalletBatched ledger contract, carried in
+	// extra.verifyingContract (see supportsBatching/getVerifyingContract in
+	// @circle-fin/x402-batching). Defaulting to a.Asset keeps every existing
+	// chain's behavior unchanged.
 	assetAddr := common.HexToAddress(a.Asset)
+	if vc, ok := a.Extra["verifyingContract"].(string); ok && vc != "" {
+		assetAddr = common.HexToAddress(vc)
+	}
 	domainSep, err := ComputeEIP712DomainSeparator(tokenName, tokenVersion, chainID, assetAddr)
 	if err != nil {
 		return nil, fmt.Errorf("domain separator: %w", err)

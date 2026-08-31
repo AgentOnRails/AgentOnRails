@@ -35,8 +35,24 @@ below has a real, tested signer behind it (not just an allowlist entry).
 | Arbitrum One | `eip155:42161` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | `ecdsa` (default) |
 | Polygon | `eip155:137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | `ecdsa` (default) |
 | Base Sepolia (testnet) | `eip155:84532` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `ecdsa` (default) |
+| Arc Testnet | `eip155:5042002` | `0x3600000000000000000000000000000000000000` | `ecdsa` (default) |
 | Solana | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | `ed25519` |
 | Solana Devnet (testnet) | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | `ed25519` |
+
+Arc is Circle's USDC-native L1; the asset address above is Arc's real
+native USDC system contract. Payments there go through Circle Gateway's
+Nanopayments feature, which signs the `exact` scheme's EIP-3009
+authorization against a *different* EIP-712 domain — its
+`GatewayWalletBatched` ledger contract, not the USDC address itself. The
+challenge's `extra.verifyingContract` field carries that contract address,
+and `chainsign/eip155.SignExact` uses it in place of the asset address when
+present; every other chain (no `verifyingContract` in `extra`) is
+unaffected. Arc Mainnet isn't listed — it hasn't launched (scheduled
+2026-09-16) and has no published USDC/Gateway address yet. This has been
+verified against Circle's own published contract addresses and client SDK
+source, but not yet against a live testnet payment — treat it with the same
+"confirm before a real payment" caution as the Permit2 witness-type
+reconstruction documented in `chainsign/eip155`.
 
 EVM chains use EIP-3009 (`ecdsa` wallets); Solana uses SPL Token
 `TransferChecked` (`ed25519` wallets, base58 addresses). `aor agents create`
